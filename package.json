@@ -1,0 +1,25 @@
+{
+  "name": "telegram-bot-alertmanager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Interactive Telegram bot with context memory, webhook trigger, and Grafana Alertmanager integration.",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.9.1",
+    "dotenv": "^16.5.0",
+    "express": "^4.21.2",
+    "openai": "^4.83.0",
+    "telegraf": "^4.16.3",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.22",
+    "@types/node": "^22.13.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
