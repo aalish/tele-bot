@@ -142,7 +142,9 @@ async function main(): Promise<void> {
     });
   });
 
-  app.use(webhookPath, bot.webhookCallback(webhookPath));
+  // Important: do not mount at webhookPath and pass webhookPath together.
+  // Telegraf validates the full path internally; double-mounting can produce 404.
+  app.use(bot.webhookCallback(webhookPath));
 
   app.get("/debug/webhook-info", async (req, res) => {
     if (config.internalApiKey) {
