@@ -1,6 +1,13 @@
 import OpenAI from "openai";
 import type { AppConfig } from "./config";
-import type { AlertItem, BotStore, NoteItem, ReminderItem, TaskItem } from "./db";
+import type {
+  AlertItem,
+  BotStore,
+  ChatMessage,
+  NoteItem,
+  ReminderItem,
+  TaskItem
+} from "./db";
 
 type EngineDeps = {
   config: AppConfig;
@@ -43,6 +50,46 @@ function summarizeOpenAlerts(alerts: AlertItem[]): string {
     .join("\n");
 }
 
+function normalizeGeneratedTitle(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const cleaned = value
+    .trim()
+    .replace(/^title\s*:\s*/i, "")
+    .replace(/["'`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!cleaned) {
+    return null;
+  }
+
+  return cleaned.length > 80 ? cleaned.slice(0, 80).trimEnd() : cleaned;
+}
+
+function fallbackConversationTitle(messages: ChatMessage[]): string {
+  const userMessages = messages.filter((message) => message.role === "user");
+  const source =
+    userMessages[userMessages.length - 1]?.content ??
+    messages[messages.length - 1]?.content ??
+    "Conversation";
+
+  const cleaned = source
+    .replace(/\s+/g, " ")
+    .replace(/[\u0000-\u001F]/g, "")
+    .trim();
+
+  if (!cleaned) {
+    return "Conversation";
+  }
+
+  const words = cleaned.split(" ").slice(0, 8);
+  const title = words.join(" ");
+  return title.length > 80 ? title.slice(0, 80).trimEnd() : title;
+}
+
 export class AssistantEngine {
   private readonly client?: OpenAI;
   private readonly config: AppConfig;
@@ -56,15 +103,29 @@ export class AssistantEngine {
     }
   }
 
-  async answer(chatId: string, userText: string): Promise<string> {
+  async answer(chatId: string, userText: string, conversationId?: number): Promise<string> {
     const tasks = this.store.listTasks(chatId, false, 10);
     const reminders = this.store.listUpcomingReminders(chatId, 10);
     const notes = this.store.listNotes(chatId, 10);
     const openAlerts = this.store.listOpenAlerts(chatId, 10);
-    const messages = this.store.getRecentMessages(chatId, this.config.maxContextMessages);
+    const messages = this.store.getRecentMessages(
+      chatId,
+      this.config.maxContextMessages,
+      conversationId
+    );
+    const conversation =
+      conversationId !== undefined
+        ? this.store.getConversation(chatId, conversationId)
+        : this.store.getActiveConversation(chatId);
+
     const systemPrompt =
       "You are a concise Telegram task assistant. Use provided task/context memory. If unsure, say what is unknown.";
     const contextPrompt = [
+      "Conversation:",
+      conversation
+        ? `id=${conversation.id}, title=${conversation.title}, status=${conversation.status}`
+        : "(unknown)",
+      "",
       "Open tasks:",
       summarizeTasks(tasks),
       "",
@@ -119,6 +180,135 @@ export class AssistantEngine {
     return this.fallbackAnswer(userText, tasks, reminders, notes, openAlerts);
   }
 
+  async generateConversationTitle(chatId: string, conversationId: number): Promise<string> {
+    const messages = this.store.listConversationMessages(chatId, conversationId, 30);
+    const fallback = fallbackConversationTitle(messages);
+
+    if (messages.length === 0 || this.config.aiProvider === "none") {
+      return fallback;
+    }
+
+    const transcript = messages
+      .map((message) => `[${message.role}] ${message.content}`)
+      .join("\n")
+      .slice(0, 5000);
+
+    const instruction = [
+      "Generate a concise, meaningful title for this conversation.",
+      "Rules:",
+      "- Return only the title.",
+      "- Max 8 words.",
+      "- No quotes.",
+      "- Use plain text."
+    ].join("\n");
+
+    try {
+      if (this.config.aiProvider === "openai" && this.client) {
+        const completion = await this.client.chat.completions.create({
+          model: this.config.openAiModel,
+          temperature: 0.1,
+          max_tokens: 24,
+          messages: [
+            { role: "system", content: instruction },
+            { role: "user", content: transcript }
+          ]
+        });
+        const raw = completion.choices[0]?.message?.content?.trim();
+        const title = normalizeGeneratedTitle(raw);
+        if (title) {
+          return title;
+        }
+      }
+
+      if (this.config.aiProvider === "gemini") {
+        const raw = await this.answerWithGemini(instruction, "", transcript);
+        const title = normalizeGeneratedTitle(raw);
+        if (title) {
+          return title;
+        }
+      }
+    } catch (error) {
+      console.error("Conversation title generation failed:", error);
+    }
+
+    return fallback;
+  }
+
+  async suggestActionCommand(chatId: string, userText: string): Promise<string | null> {
+    if (this.config.aiProvider === "none") {
+      return null;
+    }
+
+    const tasks = this.store.listTasks(chatId, true, 20);
+    const reminders = this.store.listUpcomingReminders(chatId, 10);
+    const notes = this.store.listNotes(chatId, 10);
+
+    const instruction = [
+      "You are an intent router for a Telegram assistant.",
+      "Return exactly one line.",
+      "If the user request maps to an operation, output one of these patterns exactly:",
+      "add task <text>",
+      "start task <id>",
+      "mark task <id> done",
+      "mark task <id> to todo",
+      "delete task <id>",
+      "add reminder in <number> min <text>",
+      "add reminder in <number> hour <text>",
+      "add reminder at <HH:MM AM/PM> <text>",
+      "note: <text>",
+      "show tasks",
+      "show reminders",
+      "agenda",
+      "If operation mapping is unclear, return NONE."
+    ].join("\n");
+
+    const context = [
+      "Current tasks:",
+      summarizeTasks(tasks),
+      "",
+      "Current reminders:",
+      summarizeReminders(reminders),
+      "",
+      "Recent notes:",
+      summarizeNotes(notes)
+    ].join("\n");
+
+    try {
+      if (this.config.aiProvider === "openai" && this.client) {
+        const completion = await this.client.chat.completions.create({
+          model: this.config.openAiModel,
+          temperature: 0,
+          messages: [
+            { role: "system", content: instruction },
+            { role: "system", content: context },
+            { role: "user", content: userText }
+          ]
+        });
+        const output = completion.choices[0]?.message?.content?.trim();
+        if (!output || /^none$/i.test(output)) {
+          return null;
+        }
+        return output.split("\n")[0]?.trim() || null;
+      }
+
+      if (this.config.aiProvider === "gemini") {
+        const output = await this.answerWithGemini(
+          instruction,
+          context,
+          `User request: ${userText}`
+        );
+        if (!output || /^none$/i.test(output.trim())) {
+          return null;
+        }
+        return output.split("\n")[0]?.trim() || null;
+      }
+    } catch (error) {
+      console.error("AI action routing failed:", error);
+    }
+
+    return null;
+  }
+
   private async answerWithGemini(
     systemPrompt: string,
     contextPrompt: string,
@@ -146,7 +336,7 @@ export class AssistantEngine {
             role: "user",
             parts: [
               {
-                text: `${contextPrompt}\n\nUser question:\n${userText}`
+                text: `${contextPrompt ? `${contextPrompt}\n\n` : ""}User question:\n${userText}`
               }
             ]
           }

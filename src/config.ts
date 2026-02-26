@@ -18,6 +18,7 @@ const envSchema = z.object({
   DEBUG_MODE: z.string().optional(),
   SHOW_MENU_BUTTONS: z.string().optional(),
   REMINDER_CHECK_INTERVAL_SECONDS: z.coerce.number().int().positive().max(3600).default(30),
+  CONVERSATION_IDLE_MINUTES: z.coerce.number().int().positive().max(7 * 24 * 60).default(30),
   AI_PROVIDER: z.enum(["auto", "openai", "gemini", "none"]).default("auto"),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default("gpt-4o-mini"),
@@ -41,6 +42,7 @@ export type AppConfig = {
   debugMode: boolean;
   showMenuButtons: boolean;
   reminderCheckIntervalSeconds: number;
+  conversationIdleMinutes: number;
   aiProvider: AiProvider;
   openAiApiKey?: string;
   openAiModel: string;
@@ -138,6 +140,7 @@ export function loadConfig(): AppConfig {
     debugMode: parseBoolean(env.DEBUG_MODE),
     showMenuButtons: parseBoolean(env.SHOW_MENU_BUTTONS),
     reminderCheckIntervalSeconds: env.REMINDER_CHECK_INTERVAL_SECONDS,
+    conversationIdleMinutes: env.CONVERSATION_IDLE_MINUTES,
     aiProvider: resolveAiProvider(env.AI_PROVIDER, env.OPENAI_API_KEY, env.GEMINI_API_KEY),
     openAiApiKey: env.OPENAI_API_KEY,
     openAiModel: env.OPENAI_MODEL,

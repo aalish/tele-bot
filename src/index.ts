@@ -234,8 +234,62 @@ async function main(): Promise<void> {
     }
   };
 
-  const reminderTimer = setInterval(() => {
+  let conversationTickInProgress = false;
+  const runConversationTick = async (): Promise<void> => {
+    if (conversationTickInProgress) {
+      return;
+    }
+    conversationTickInProgress = true;
+    try {
+      const cutoffIso = new Date(
+        Date.now() - config.conversationIdleMinutes * 60 * 1000
+      ).toISOString();
+      const stale = store.listStaleActiveConversations(cutoffIso, 50);
+      if (stale.length > 0) {
+        logDebug(config.debugMode, "Processing stale conversations", {
+          count: stale.length,
+          idle_minutes: config.conversationIdleMinutes
+        });
+      }
+
+      for (const conversation of stale) {
+        try {
+          const title = await assistant.generateConversationTitle(
+            conversation.chat_id,
+            conversation.id
+          );
+          const saved = store.saveConversation(
+            conversation.chat_id,
+            conversation.id,
+            title,
+            "idle_timeout"
+          );
+          if (!saved) {
+            continue;
+          }
+          await bot.telegram.sendMessage(
+            conversation.chat_id,
+            [
+              `Conversation auto-saved: #${conversation.id}`,
+              `Title: ${title}`,
+              "Use /chats to reopen it."
+            ].join("\n")
+          );
+        } catch (error) {
+          console.error(
+            `Failed auto-saving conversation #${conversation.id}:`,
+            error
+          );
+        }
+      }
+    } finally {
+      conversationTickInProgress = false;
+    }
+  };
+
+  const backgroundTimer = setInterval(() => {
     void runReminderTick();
+    void runConversationTick();
   }, config.reminderCheckIntervalSeconds * 1000);
 
   const server = app.listen(config.port, async () => {
@@ -262,6 +316,12 @@ async function main(): Promise<void> {
         { command: "note", description: "Save quick note" },
         { command: "notes", description: "List notes" },
         { command: "delnote", description: "Delete note by id" },
+        { command: "newchat", description: "Start new conversation" },
+        { command: "savechat", description: "Save and end current conversation" },
+        { command: "endchat", description: "Alias: save and end current conversation" },
+        { command: "activechat", description: "Show current conversation" },
+        { command: "chats", description: "List conversation history" },
+        { command: "openchat", description: "Open conversation by id" },
         { command: "agenda", description: "Daily snapshot" },
         { command: "help", description: "Show help" }
       ]);
@@ -279,6 +339,7 @@ async function main(): Promise<void> {
         });
       }
       await runReminderTick();
+      await runConversationTick();
     } catch (error) {
       console.error("Webhook setup failed:", error);
     }
@@ -286,7 +347,7 @@ async function main(): Promise<void> {
 
   const shutdown = () => {
     console.log("Shutting down...");
-    clearInterval(reminderTimer);
+    clearInterval(backgroundTimer);
     server.close(() => {
       store.close();
       process.exit(0);

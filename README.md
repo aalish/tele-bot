@@ -8,6 +8,7 @@ This project gives you a Telegram bot with these goals covered:
 4. Webhook-triggered Telegram updates
 5. Grafana Alertmanager webhook compatibility
 6. Day-to-day assistant features (reminders, notes, agenda, alert history)
+7. Conversation sessions (new/save/list/restore + idle auto-save)
 
 ## Stack
 
@@ -68,6 +69,11 @@ Your `PUBLIC_BASE_URL` must be HTTPS and reachable by Telegram.
 - `/note call electrician` to save quick note
 - `/notes` to list notes
 - `/delnote 4` to delete note `#4`
+- `/newchat` to start a fresh conversation context
+- `/savechat [optional title]` (or `/endchat`) to save current conversation and start a new one
+- `/activechat` to inspect the active conversation id/title/date
+- `/chats` to list saved/active conversations with date/time
+- `/openchat <id>` to continue an older conversation
 - `/agenda` to view tasks + reminders + open alerts + notes snapshot
 - Natural reminder text also works:
   - `remind me to stretch in 20 minutes`
@@ -78,7 +84,10 @@ Your `PUBLIC_BASE_URL` must be HTTPS and reachable by Telegram.
   - `mark task 3 done`
   - `delete task 3`
   - `show tasks`
-- Send regular text questions; bot replies using chat memory
+- If local parser misses an operation, AI can map plain text intent to supported actions and execute it.
+- You can send photos to the bot. It acknowledges them and stores a photo marker in memory.
+- Send regular text questions; bot replies using active conversation memory
+- `/chats` also shows clickable restore buttons for recent conversations
 
 ### Send personal message via API
 
@@ -119,6 +128,9 @@ Set bot target chat IDs via:
 - Reminder scheduler:
   - Set `REMINDER_CHECK_INTERVAL_SECONDS` (default `30`) for reminder delivery frequency.
   - Reminders are delivered by a background loop even when no new chat message arrives.
+- Conversation idle auto-save:
+  - Set `CONVERSATION_IDLE_MINUTES` (default `30`).
+  - If an active conversation has no activity for that duration, it is auto-saved with an AI-generated title.
 - Access control:
   - `ALLOWED_TELEGRAM_USER_IDS=12345,67890` restricts usage to listed Telegram `user_id` values.
   - `BOT_PASSWORD=...` enables password login via `/login <password>`.

@@ -5,6 +5,7 @@ import type { AppConfig } from "./config";
 import type {
   AlertItem,
   BotStore,
+  ConversationListItem,
   NoteItem,
   ReminderItem,
   TaskStatus,
@@ -60,6 +61,7 @@ function menuKeyboard() {
     ],
     [Markup.button.callback("Daily agenda", "agenda_show")],
     [Markup.button.callback("Alert history", "alerts_show")],
+    [Markup.button.callback("Conversations", "conversations_show")],
     [Markup.button.callback("Clear context", "context_clear")]
   ]);
 }
@@ -139,6 +141,35 @@ function renderAlertList(alerts: AlertItem[]): string {
       return `#${alert.id} [${state}${manual}] ${alert.alertname} (${alert.severity}) on ${alert.instance}\n${alert.summary}`;
     })
     .join("\n\n");
+}
+
+function renderConversationList(conversations: ConversationListItem[]): string {
+  if (conversations.length === 0) {
+    return "No saved conversations yet.";
+  }
+
+  return conversations
+    .map((conversation) => {
+      const status = conversation.status === "active" ? "ACTIVE" : "SAVED";
+      const when = formatUtc(conversation.last_activity_at);
+      return `#${conversation.id} [${status}] ${conversation.title}\nUpdated: ${when} | Messages: ${conversation.message_count}`;
+    })
+    .join("\n\n");
+}
+
+function conversationOpenKeyboard(conversations: ConversationListItem[]) {
+  const selectable = conversations.filter((conversation) => conversation.message_count > 0);
+  if (selectable.length === 0) {
+    return undefined;
+  }
+
+  const rows = selectable.slice(0, 8).map((conversation) => [
+    Markup.button.callback(
+      `Open #${conversation.id}`,
+      `conv_open_${conversation.id}`
+    )
+  ]);
+  return Markup.inlineKeyboard(rows);
 }
 
 function renderAgenda(store: BotStore, chatId: string): string {
@@ -686,6 +717,13 @@ function parseAssistantAction(text: string, now: Date): ParsedAssistantAction | 
   return null;
 }
 
+function cleanAiActionCandidate(value: string): string {
+  return value
+    .trim()
+    .replace(/^["'`]|["'`]$/g, "")
+    .replace(/^action:\s*/i, "");
+}
+
 export function createBot({ config, store, assistant }: BotDeps): Telegraf {
   const bot = new Telegraf(config.botToken);
 
@@ -747,6 +785,112 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     }
   });
 
+  const getActiveConversationId = (chatId: string): number =>
+    store.getOrCreateActiveConversation(chatId).id;
+
+  const saveConversationWithGeneratedTitle = async (
+    chatId: string,
+    conversationId: number,
+    reason: string,
+    requestedTitle?: string
+  ): Promise<{ id: number; title: string } | null> => {
+    const conversation = store.getConversation(chatId, conversationId);
+    if (!conversation) {
+      return null;
+    }
+
+    const messageCount = store.countConversationMessages(conversationId);
+    if (messageCount <= 0) {
+      return null;
+    }
+
+    const provided = requestedTitle?.trim();
+    const title =
+      provided && provided.length > 0
+        ? provided
+        : await assistant.generateConversationTitle(chatId, conversationId);
+    const saved = store.saveConversation(chatId, conversationId, title, reason);
+    if (!saved) {
+      return null;
+    }
+
+    return { id: conversationId, title };
+  };
+
+  const listConversationHistory = async (
+    ctx: any,
+    chatId: string
+  ): Promise<void> => {
+    const conversations = store.listConversations(chatId, 20, true);
+    const keyboard = conversationOpenKeyboard(
+      conversations.filter((conversation) => conversation.status === "saved")
+    );
+    await ctx.reply(
+      [
+        "Conversation history:",
+        renderConversationList(conversations),
+        "",
+        "Use /openchat <id> or tap a button to continue."
+      ].join("\n"),
+      keyboard
+    );
+  };
+
+  const openConversation = async (
+    chatId: string,
+    conversationId: number
+  ): Promise<{ ok: boolean; message: string }> => {
+    const target = store.getConversation(chatId, conversationId);
+    if (!target) {
+      return { ok: false, message: "Conversation id not found." };
+    }
+
+    const active = store.getActiveConversation(chatId);
+    if (active && active.id !== conversationId) {
+      await saveConversationWithGeneratedTitle(chatId, active.id, "manual_switch");
+    }
+
+    const ok = store.activateConversation(chatId, conversationId);
+    if (!ok) {
+      return { ok: false, message: "Could not activate that conversation." };
+    }
+
+    const activated = store.getActiveConversation(chatId);
+    if (!activated) {
+      return { ok: false, message: "Conversation activation failed." };
+    }
+
+    const count = store.countConversationMessages(activated.id);
+    return {
+      ok: true,
+      message: [
+        `Active conversation: #${activated.id}`,
+        `Title: ${activated.title}`,
+        `Updated: ${formatUtc(activated.last_activity_at)}`,
+        `Messages: ${count}`
+      ].join("\n")
+    };
+  };
+
+  const saveCurrentConversation = async (
+    chatId: string,
+    reason: string,
+    requestedTitle?: string
+  ): Promise<{ savedId: number; title: string } | null> => {
+    const active = store.getActiveConversation(chatId);
+    if (!active) {
+      return null;
+    }
+
+    const saved = await saveConversationWithGeneratedTitle(
+      chatId,
+      active.id,
+      reason,
+      requestedTitle
+    );
+    return saved ? { savedId: saved.id, title: saved.title } : null;
+  };
+
   bot.start(async (ctx) => {
     const userId = resolveUserId(ctx);
     const chatId = resolveChatId(ctx);
@@ -757,7 +901,8 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
       await ctx.reply(buildUnauthorizedMessage(config));
       return;
     }
-    store.addMessage(chatId, "system", "User started the bot");
+    const activeConversationId = getActiveConversationId(chatId);
+    store.addMessage(chatId, "system", "User started the bot", activeConversationId);
     await ctx.reply(
       [
         "Bot is ready.",
@@ -776,6 +921,11 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
         "/remind ... - create reminder",
         "/agenda - show tasks + reminders + alerts + notes",
         "/note <text> - save quick note",
+        "/newchat - start fresh conversation",
+        "/savechat [title] or /endchat - end and save current conversation",
+        "/chats - list previous conversations",
+        "/openchat <id> - continue a saved conversation",
+        "/activechat - show active conversation details",
         "Use `task: <text>` to create a task."
       ].join("\n"),
       menuMarkup(config)
@@ -797,6 +947,8 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
         "/remind ... -> set reminder",
         "/reminders, /cancelreminder <id> -> manage reminders",
         "/note <text>, /notes, /delnote <id> -> quick notes",
+        "/newchat, /savechat [title], /endchat -> conversation lifecycle",
+        "/chats, /openchat <id>, /activechat -> browse and restore conversations",
         "/agenda -> daily snapshot",
         "/menu -> show action buttons when needed",
         "",
@@ -810,6 +962,155 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
 
   bot.command("menu", async (ctx) => {
     await ctx.reply("Quick actions", menuKeyboard());
+  });
+
+  bot.command("newchat", async (ctx) => {
+    const chatId = resolveChatId(ctx);
+    if (!chatId) {
+      return;
+    }
+
+    const saved = await saveCurrentConversation(chatId, "manual_new");
+    const created = store.createConversation(chatId, "New conversation", "active");
+    store.addMessage(
+      chatId,
+      "system",
+      `Started conversation #${created.id}`,
+      created.id
+    );
+
+    const lines = [
+      `Started new conversation: #${created.id}`,
+      `Started at: ${formatUtc(created.started_at)}`
+    ];
+    if (saved) {
+      lines.unshift(`Saved #${saved.savedId}: ${saved.title}`);
+    }
+    await ctx.reply(lines.join("\n"), menuMarkup(config));
+  });
+
+  const handleSaveConversationCommand = async (ctx: any): Promise<void> => {
+    const chatId = resolveChatId(ctx);
+    if (!chatId) {
+      return;
+    }
+
+    const active = store.getActiveConversation(chatId);
+    if (!active) {
+      await ctx.reply("No active conversation found. Send a message to start one.");
+      return;
+    }
+
+    const messageCount = store.countConversationMessages(active.id);
+    if (messageCount <= 0) {
+      await ctx.reply("Active conversation is empty, nothing to save.");
+      return;
+    }
+
+    const requestedTitle = extractCommandArgs(ctx.message.text) || undefined;
+    const saved = await saveCurrentConversation(chatId, "manual_save", requestedTitle);
+    if (!saved) {
+      await ctx.reply("Could not save the active conversation.");
+      return;
+    }
+
+    const fresh = store.createConversation(chatId, "New conversation", "active");
+    store.addMessage(
+      chatId,
+      "system",
+      `Started conversation #${fresh.id}`,
+      fresh.id
+    );
+    await ctx.reply(
+      [
+        `Conversation saved: #${saved.savedId}`,
+        `Title: ${saved.title}`,
+        `New active conversation: #${fresh.id}`
+      ].join("\n"),
+      menuMarkup(config)
+    );
+  };
+
+  bot.command("savechat", handleSaveConversationCommand);
+  bot.command("endchat", handleSaveConversationCommand);
+
+  bot.command("activechat", async (ctx) => {
+    const chatId = resolveChatId(ctx);
+    if (!chatId) {
+      return;
+    }
+    const active = store.getActiveConversation(chatId);
+    if (!active) {
+      await ctx.reply("No active conversation found. Send a message to start one.");
+      return;
+    }
+    const messageCount = store.countConversationMessages(active.id);
+    await ctx.reply(
+      [
+        `Active conversation: #${active.id}`,
+        `Title: ${active.title}`,
+        `Started: ${formatUtc(active.started_at)}`,
+        `Last activity: ${formatUtc(active.last_activity_at)}`,
+        `Messages: ${messageCount}`
+      ].join("\n"),
+      menuMarkup(config)
+    );
+  });
+
+  bot.command("chats", async (ctx) => {
+    const chatId = resolveChatId(ctx);
+    if (!chatId) {
+      return;
+    }
+    await listConversationHistory(ctx, chatId);
+  });
+
+  bot.command("openchat", async (ctx) => {
+    const chatId = resolveChatId(ctx);
+    if (!chatId) {
+      return;
+    }
+    const args = extractCommandArgs(ctx.message.text);
+    const conversationId = Number(args);
+    if (!Number.isInteger(conversationId) || conversationId <= 0) {
+      await ctx.reply("Usage: /openchat <conversation_id>");
+      return;
+    }
+
+    const opened = await openConversation(chatId, conversationId);
+    await ctx.reply(opened.message, menuMarkup(config));
+  });
+
+  bot.on(message("photo"), async (ctx) => {
+    const chatId = resolveChatId(ctx);
+    if (!chatId) {
+      return;
+    }
+
+    const caption = ctx.message.caption?.trim();
+    const activeConversationId = getActiveConversationId(chatId);
+    store.addMessage(
+      chatId,
+      "user",
+      caption ? `[photo] ${caption}` : "[photo]",
+      activeConversationId
+    );
+
+    if (caption) {
+      const localAction = parseAssistantAction(caption, new Date());
+      if (localAction) {
+        await ctx.reply(
+          "Photo received. I detected an action in caption. Please resend as plain text for execution.",
+          menuMarkup(config)
+        );
+        return;
+      }
+    }
+
+    await ctx.reply(
+      "Photo received. You can add caption like `note: ...` or send plain text command after photo.",
+      menuMarkup(config)
+    );
   });
 
   bot.command("myid", async (ctx) => {
@@ -982,10 +1283,12 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
       return;
     }
     const id = store.createReminder(chatId, parsed.text, parsed.remindAt.toISOString());
+    const activeConversationId = getActiveConversationId(chatId);
     store.addMessage(
       chatId,
       "system",
-      `Reminder #${id} created for ${formatUtc(parsed.remindAt)}: ${parsed.text}`
+      `Reminder #${id} created for ${formatUtc(parsed.remindAt)}: ${parsed.text}`,
+      activeConversationId
     );
     await ctx.reply(
       `Reminder set: #${id}\nWhen: ${formatUtc(parsed.remindAt)}\nWhat: ${parsed.text}`,
@@ -1074,7 +1377,8 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     }
 
     const id = store.createTask(chatId, text);
-    store.addMessage(chatId, "system", `Task #${id} created: ${text}`);
+    const activeConversationId = getActiveConversationId(chatId);
+    store.addMessage(chatId, "system", `Task #${id} created: ${text}`, activeConversationId);
     await ctx.reply(`Task created: #${id} ${text}`, menuMarkup(config));
   });
 
@@ -1145,6 +1449,35 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     await ctx.reply(renderAlertList(store.listAlerts(chatId, 20)), menuMarkup(config));
   });
 
+  bot.action("conversations_show", async (ctx) => {
+    await ctx.answerCbQuery();
+    const chatId = resolveChatId(ctx);
+    if (!chatId) {
+      return;
+    }
+    await listConversationHistory(ctx, chatId);
+  });
+
+  bot.action(/^conv_open_(\d+)$/, async (ctx) => {
+    const chatId = resolveChatId(ctx);
+    if (!chatId) {
+      await ctx.answerCbQuery("Chat not found");
+      return;
+    }
+
+    const data = ctx.match;
+    const idText = Array.isArray(data) ? data[1] : undefined;
+    const conversationId = Number(idText);
+    if (!Number.isInteger(conversationId) || conversationId <= 0) {
+      await ctx.answerCbQuery("Invalid conversation id");
+      return;
+    }
+
+    const opened = await openConversation(chatId, conversationId);
+    await ctx.answerCbQuery(opened.ok ? "Conversation restored" : "Open failed");
+    await ctx.reply(opened.message, menuMarkup(config));
+  });
+
   bot.action("agenda_show", async (ctx) => {
     await ctx.answerCbQuery();
     const chatId = resolveChatId(ctx);
@@ -1160,9 +1493,108 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     if (!chatId) {
       return;
     }
-    const deleted = store.clearMessages(chatId);
-    await ctx.reply(`Context cleared (${deleted} messages).`, menuMarkup(config));
+    const activeConversation = store.getActiveConversation(chatId);
+    if (!activeConversation) {
+      await ctx.reply("No active conversation to clear.", menuMarkup(config));
+      return;
+    }
+    const deleted = store.clearMessages(chatId, activeConversation.id);
+    await ctx.reply(
+      `Context cleared for conversation #${activeConversation.id} (${deleted} messages).`,
+      menuMarkup(config)
+    );
   });
+
+  const executeParsedAction = async (
+    action: ParsedAssistantAction,
+    ctx: any,
+    chatId: string,
+    conversationId: number
+  ): Promise<void> => {
+    if (action.type === "create_task") {
+      const id = store.createTask(chatId, action.text);
+      store.addMessage(
+        chatId,
+        "system",
+        `Task #${id} created: ${action.text}`,
+        conversationId
+      );
+      await ctx.reply(`Task created: #${id} ${action.text}`, menuMarkup(config));
+      return;
+    }
+
+    if (action.type === "update_task_status") {
+      const ok = store.setTaskStatus(chatId, action.taskId, action.status);
+      if (!ok) {
+        await ctx.reply("Task id not found.");
+        return;
+      }
+      const label =
+        action.status === "in_progress"
+          ? "in progress"
+          : action.status === "done"
+          ? "done"
+          : "todo";
+      await ctx.reply(`Task #${action.taskId} moved to ${label}.`, menuMarkup(config));
+      return;
+    }
+
+    if (action.type === "delete_task") {
+      const ok = store.deleteTask(chatId, action.taskId);
+      await ctx.reply(ok ? `Task #${action.taskId} removed.` : "Task id not found.");
+      return;
+    }
+
+    if (action.type === "list_tasks") {
+      await ctx.reply(renderTaskList(store.listTasks(chatId, true, 50)), menuMarkup(config));
+      return;
+    }
+
+    if (action.type === "create_note") {
+      const id = store.createNote(chatId, action.text);
+      await ctx.reply(`Note saved: #${id}`, menuMarkup(config));
+      return;
+    }
+
+    if (action.type === "create_reminder") {
+      if (action.reminder.remindAt.getTime() <= Date.now()) {
+        await ctx.reply("Reminder time must be in the future.");
+        return;
+      }
+      const reminderId = store.createReminder(
+        chatId,
+        action.reminder.text,
+        action.reminder.remindAt.toISOString()
+      );
+      store.addMessage(
+        chatId,
+        "system",
+        `Reminder #${reminderId} created for ${formatUtc(action.reminder.remindAt)}: ${
+          action.reminder.text
+        }`,
+        conversationId
+      );
+      await ctx.reply(
+        `Reminder set: #${reminderId}\nWhen: ${formatUtc(action.reminder.remindAt)}\nWhat: ${
+          action.reminder.text
+        }`,
+        menuMarkup(config)
+      );
+      return;
+    }
+
+    if (action.type === "list_reminders") {
+      await ctx.reply(
+        renderReminderList(store.listUpcomingReminders(chatId, 20)),
+        menuMarkup(config)
+      );
+      return;
+    }
+
+    if (action.type === "show_agenda") {
+      await ctx.reply(renderAgenda(store, chatId), menuMarkup(config));
+    }
+  };
 
   bot.on(message("text"), async (ctx) => {
     const chatId = resolveChatId(ctx);
@@ -1173,92 +1605,34 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     if (!text || isSkippableInput(text)) {
       return;
     }
+    const activeConversationId = getActiveConversationId(chatId);
 
     const action = parseAssistantAction(text, new Date());
     if (action) {
-      if (action.type === "create_task") {
-        const id = store.createTask(chatId, action.text);
-        store.addMessage(chatId, "system", `Task #${id} created: ${action.text}`);
-        await ctx.reply(`Task created: #${id} ${action.text}`, menuMarkup(config));
-        return;
-      }
+      store.addMessage(chatId, "user", text, activeConversationId);
+      await executeParsedAction(action, ctx, chatId, activeConversationId);
+      return;
+    }
 
-      if (action.type === "update_task_status") {
-        const ok = store.setTaskStatus(chatId, action.taskId, action.status);
-        if (!ok) {
-          await ctx.reply("Task id not found.");
-          return;
-        }
-        const label =
-          action.status === "in_progress"
-            ? "in progress"
-            : action.status === "done"
-            ? "done"
-            : "todo";
-        await ctx.reply(`Task #${action.taskId} moved to ${label}.`, menuMarkup(config));
-        return;
-      }
-
-      if (action.type === "delete_task") {
-        const ok = store.deleteTask(chatId, action.taskId);
-        await ctx.reply(ok ? `Task #${action.taskId} removed.` : "Task id not found.");
-        return;
-      }
-
-      if (action.type === "list_tasks") {
-        await ctx.reply(renderTaskList(store.listTasks(chatId, true, 50)), menuMarkup(config));
-        return;
-      }
-
-      if (action.type === "create_note") {
-        const id = store.createNote(chatId, action.text);
-        await ctx.reply(`Note saved: #${id}`, menuMarkup(config));
-        return;
-      }
-
-      if (action.type === "create_reminder") {
-        if (action.reminder.remindAt.getTime() <= Date.now()) {
-          await ctx.reply("Reminder time must be in the future.");
-          return;
-        }
-        const reminderId = store.createReminder(
-          chatId,
-          action.reminder.text,
-          action.reminder.remindAt.toISOString()
-        );
-        store.addMessage(
-          chatId,
-          "system",
-          `Reminder #${reminderId} created for ${formatUtc(action.reminder.remindAt)}: ${
-            action.reminder.text
-          }`
-        );
-        await ctx.reply(
-          `Reminder set: #${reminderId}\nWhen: ${formatUtc(action.reminder.remindAt)}\nWhat: ${
-            action.reminder.text
-          }`,
-          menuMarkup(config)
-        );
-        return;
-      }
-
-      if (action.type === "list_reminders") {
-        await ctx.reply(
-          renderReminderList(store.listUpcomingReminders(chatId, 20)),
-          menuMarkup(config)
-        );
-        return;
-      }
-
-      if (action.type === "show_agenda") {
-        await ctx.reply(renderAgenda(store, chatId), menuMarkup(config));
+    const aiActionText = await assistant.suggestActionCommand(chatId, text);
+    if (aiActionText) {
+      const cleaned = cleanAiActionCandidate(aiActionText);
+      const aiParsed = parseAssistantAction(cleaned, new Date());
+      if (aiParsed) {
+        logDebug(config.debugMode, "AI mapped request to action", {
+          chat_id: chatId,
+          input: text,
+          ai_action: cleaned
+        });
+        store.addMessage(chatId, "user", text, activeConversationId);
+        await executeParsedAction(aiParsed, ctx, chatId, activeConversationId);
         return;
       }
     }
 
-    store.addMessage(chatId, "user", text);
-    const answer = await assistant.answer(chatId, text);
-    store.addMessage(chatId, "assistant", answer);
+    store.addMessage(chatId, "user", text, activeConversationId);
+    const answer = await assistant.answer(chatId, text, activeConversationId);
+    store.addMessage(chatId, "assistant", answer, activeConversationId);
     await ctx.reply(answer, menuMarkup(config));
     logDebug(config.debugMode, "Answered message", {
       chat_id: chatId,
