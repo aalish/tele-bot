@@ -3,6 +3,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 export type ChatRole = "user" | "assistant" | "system";
+export type TaskStatus = "todo" | "in_progress" | "done";
 
 export type ChatMessage = {
   id: number;
@@ -16,6 +17,7 @@ export type TaskItem = {
   id: number;
   chat_id: string;
   text: string;
+  status: TaskStatus;
   done: number;
   created_at: string;
 };
@@ -99,6 +101,7 @@ export class BotStore {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chat_id TEXT NOT NULL,
         text TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'todo' CHECK(status IN ('todo', 'in_progress', 'done')),
         done INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
@@ -151,6 +154,9 @@ export class BotStore {
       CREATE INDEX IF NOT EXISTS idx_tasks_chat_done_created
       ON tasks(chat_id, done, id DESC);
 
+      CREATE INDEX IF NOT EXISTS idx_tasks_chat_status_created
+      ON tasks(chat_id, status, id DESC);
+
       CREATE INDEX IF NOT EXISTS idx_reminders_due
       ON reminders(sent, remind_at, id);
 
@@ -159,6 +165,37 @@ export class BotStore {
 
       CREATE INDEX IF NOT EXISTS idx_alerts_chat_status_updated
       ON alerts(chat_id, status, updated_at DESC);
+    `);
+
+    this.migrateTasksTable();
+  }
+
+  private migrateTasksTable(): void {
+    const columns = this.db
+      .prepare("PRAGMA table_info(tasks)")
+      .all() as Array<{ name: string }>;
+    const names = new Set(columns.map((column) => column.name));
+
+    if (!names.has("status")) {
+      this.db.exec(
+        "ALTER TABLE tasks ADD COLUMN status TEXT NOT NULL DEFAULT 'todo'"
+      );
+    }
+
+    if (!names.has("done")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN done INTEGER NOT NULL DEFAULT 0");
+    }
+
+    this.db.exec(`
+      UPDATE tasks
+      SET status = CASE
+        WHEN done = 1 THEN 'done'
+        WHEN status NOT IN ('todo', 'in_progress', 'done') THEN 'todo'
+        ELSE status
+      END;
+
+      UPDATE tasks
+      SET done = CASE WHEN status = 'done' THEN 1 ELSE 0 END;
     `);
   }
 
@@ -194,7 +231,7 @@ export class BotStore {
 
   createTask(chatId: string, text: string): number {
     const result = this.db
-      .prepare("INSERT INTO tasks (chat_id, text) VALUES (?, ?)")
+      .prepare("INSERT INTO tasks (chat_id, text, status, done) VALUES (?, ?, 'todo', 0)")
       .run(chatId, text);
     return Number(result.lastInsertRowid);
   }
@@ -204,7 +241,7 @@ export class BotStore {
       return this.db
         .prepare(
           `
-          SELECT id, chat_id, text, done, created_at
+          SELECT id, chat_id, text, status, done, created_at
           FROM tasks
           WHERE chat_id = ?
           ORDER BY id DESC
@@ -217,9 +254,9 @@ export class BotStore {
     return this.db
       .prepare(
         `
-        SELECT id, chat_id, text, done, created_at
+        SELECT id, chat_id, text, status, done, created_at
         FROM tasks
-        WHERE chat_id = ? AND done = 0
+        WHERE chat_id = ? AND status IN ('todo', 'in_progress')
         ORDER BY id DESC
         LIMIT ?
       `
@@ -228,8 +265,22 @@ export class BotStore {
   }
 
   markTaskDone(chatId: string, taskId: number): boolean {
+    return this.setTaskStatus(chatId, taskId, "done");
+  }
+
+  setTaskStatus(chatId: string, taskId: number, status: TaskStatus): boolean {
+    const done = status === "done" ? 1 : 0;
     const result = this.db
-      .prepare("UPDATE tasks SET done = 1 WHERE chat_id = ? AND id = ?")
+      .prepare(
+        "UPDATE tasks SET status = ?, done = ? WHERE chat_id = ? AND id = ?"
+      )
+      .run(status, done, chatId, taskId);
+    return result.changes > 0;
+  }
+
+  deleteTask(chatId: string, taskId: number): boolean {
+    const result = this.db
+      .prepare("DELETE FROM tasks WHERE chat_id = ? AND id = ?")
       .run(chatId, taskId);
     return result.changes > 0;
   }

@@ -12,7 +12,7 @@ function summarizeTasks(tasks: TaskItem[]): string {
     return "No open tasks.";
   }
 
-  return tasks.map((task) => `#${task.id} ${task.text}`).join("\n");
+  return tasks.map((task) => `#${task.id} [${task.status}] ${task.text}`).join("\n");
 }
 
 function summarizeReminders(reminders: ReminderItem[]): string {

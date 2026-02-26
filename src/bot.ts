@@ -7,6 +7,7 @@ import type {
   BotStore,
   NoteItem,
   ReminderItem,
+  TaskStatus,
   TaskItem
 } from "./db";
 
@@ -20,6 +21,16 @@ type ParsedReminder = {
   text: string;
   remindAt: Date;
 };
+
+type ParsedAssistantAction =
+  | { type: "create_task"; text: string }
+  | { type: "update_task_status"; taskId: number; status: TaskStatus }
+  | { type: "delete_task"; taskId: number }
+  | { type: "list_tasks" }
+  | { type: "create_note"; text: string }
+  | { type: "create_reminder"; reminder: ParsedReminder }
+  | { type: "list_reminders" }
+  | { type: "show_agenda" };
 
 function logDebug(enabled: boolean, message: string, details?: Record<string, unknown>) {
   if (!enabled) {
@@ -36,23 +47,61 @@ function logDebug(enabled: boolean, message: string, details?: Record<string, un
 function menuKeyboard() {
   return Markup.inlineKeyboard([
     [
-      Markup.button.callback("Create task", "task_create"),
-      Markup.button.callback("List tasks", "task_list")
+      Markup.button.callback("Add task", "task_create"),
+      Markup.button.callback("My tasks", "task_list")
     ],
     [
-      Markup.button.callback("Set reminder", "reminder_create"),
-      Markup.button.callback("Alerts", "alerts_show")
+      Markup.button.callback("Move task", "task_progress_prompt"),
+      Markup.button.callback("Complete task", "task_done_prompt")
     ],
-    [Markup.button.callback("Agenda", "agenda_show")],
+    [
+      Markup.button.callback("Delete task", "task_delete_prompt"),
+      Markup.button.callback("Set reminder", "reminder_create")
+    ],
+    [Markup.button.callback("Daily agenda", "agenda_show")],
+    [Markup.button.callback("Alert history", "alerts_show")],
     [Markup.button.callback("Clear context", "context_clear")]
   ]);
 }
 
 function renderTaskList(tasks: TaskItem[]): string {
   if (tasks.length === 0) {
-    return "No open tasks.";
+    return "No tasks found.";
   }
-  return tasks.map((task) => `#${task.id} ${task.text}`).join("\n");
+
+  const byStatus: Record<TaskStatus, TaskItem[]> = {
+    todo: [],
+    in_progress: [],
+    done: []
+  };
+  for (const task of tasks) {
+    byStatus[task.status].push(task);
+  }
+
+  const lines: string[] = [];
+  const pushSection = (title: string, list: TaskItem[]) => {
+    if (list.length === 0) {
+      return;
+    }
+    lines.push(`${title}:`);
+    for (const task of list) {
+      lines.push(`- #${task.id} ${task.text}`);
+    }
+    lines.push("");
+  };
+
+  pushSection("To do", byStatus.todo);
+  pushSection("In progress", byStatus.in_progress);
+  pushSection("Done", byStatus.done);
+
+  if (lines.length === 0) {
+    return "No tasks found.";
+  }
+
+  if (lines[lines.length - 1] === "") {
+    lines.pop();
+  }
+  return lines.join("\n");
 }
 
 function renderReminderList(reminders: ReminderItem[]): string {
@@ -427,6 +476,102 @@ function reminderUsageText(): string {
   ].join("\n");
 }
 
+function taskUsageText(): string {
+  return [
+    "Task commands:",
+    "/tasks",
+    "/taskprogress <task_id>",
+    "/tasktodo <task_id>",
+    "/done <task_id>",
+    "/taskremove <task_id>",
+    "",
+    "Natural examples:",
+    "add task call bank",
+    "start task 3",
+    "mark task 3 done",
+    "delete task 3"
+  ].join("\n");
+}
+
+function parseAssistantAction(text: string, now: Date): ParsedAssistantAction | null {
+  const value = text.trim();
+  const normalized = value.toLowerCase();
+
+  const createTaskMatch = value.match(
+    /^(?:add|create|new)\s+(?:a\s+)?task\s*:?\s+(.+)$/i
+  );
+  if (createTaskMatch?.[1]) {
+    return { type: "create_task", text: createTaskMatch[1].trim() };
+  }
+
+  const todoPrefixMatch = value.match(/^todo:\s*(.+)$/i);
+  if (todoPrefixMatch?.[1]) {
+    return { type: "create_task", text: todoPrefixMatch[1].trim() };
+  }
+
+  const statusSpecs: Array<{ regex: RegExp; status: TaskStatus }> = [
+    {
+      regex:
+        /^(?:start|begin|move|mark|set|update)\s+task\s+#?(\d+)\s+(?:to\s+)?(?:in[\s_-]*progress|doing)$/i,
+      status: "in_progress"
+    },
+    {
+      regex:
+        /^(?:mark|set|update)\s+task\s+#?(\d+)\s+(?:to\s+)?(?:to[\s_-]*do|todo|pending)$/i,
+      status: "todo"
+    },
+    {
+      regex:
+        /^(?:mark|set|complete|finish|done)\s+task\s+#?(\d+)\s*(?:as\s+done)?$/i,
+      status: "done"
+    }
+  ];
+
+  for (const spec of statusSpecs) {
+    const match = value.match(spec.regex);
+    const taskId = Number(match?.[1]);
+    if (match && Number.isInteger(taskId) && taskId > 0) {
+      return { type: "update_task_status", taskId, status: spec.status };
+    }
+  }
+
+  const deleteMatch = value.match(
+    /^(?:remove|delete)\s+task\s+#?(\d+)(?:\s+please)?$/i
+  );
+  const deleteId = Number(deleteMatch?.[1]);
+  if (deleteMatch && Number.isInteger(deleteId) && deleteId > 0) {
+    return { type: "delete_task", taskId: deleteId };
+  }
+
+  if (normalized === "show tasks" || normalized === "list tasks" || normalized === "my tasks") {
+    return { type: "list_tasks" };
+  }
+
+  const noteMatch = value.match(/^(?:save\s+)?note:\s*(.+)$/i);
+  if (noteMatch?.[1]) {
+    return { type: "create_note", text: noteMatch[1].trim() };
+  }
+
+  if (normalized === "show reminders" || normalized === "list reminders") {
+    return { type: "list_reminders" };
+  }
+
+  if (
+    normalized === "agenda" ||
+    normalized === "show agenda" ||
+    normalized === "plan my day"
+  ) {
+    return { type: "show_agenda" };
+  }
+
+  const reminder = parseNaturalReminder(value, now);
+  if (reminder) {
+    return { type: "create_reminder", reminder };
+  }
+
+  return null;
+}
+
 export function createBot({ config, store, assistant }: BotDeps): Telegraf {
   const bot = new Telegraf(config.botToken);
 
@@ -506,8 +651,11 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
         "/myid - show your user_id and chat_id",
         "/login <password> - unlock bot access (when enabled)",
         "/logout - remove saved login (when enabled)",
-        "/tasks - list open tasks",
+        "/tasks - show task board",
+        "/taskprogress <id> - move task to in progress",
+        "/tasktodo <id> - move task back to todo",
         "/done <id> - mark task done",
+        "/taskremove <id> - delete task",
         "/alerts - show recent alert history",
         "/alertresolve <id> - manually mark alert resolved",
         "/remind ... - create reminder",
@@ -529,14 +677,16 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
       [
         "Plain text -> assistant reply with context memory.",
         "task: <text> -> create task",
-        "/tasks, /done <id> -> manage tasks",
+        "/tasks, /taskprogress <id>, /tasktodo <id>, /done <id>, /taskremove <id> -> manage tasks",
         "/alerts, /alertresolve <id> -> alert history/manual resolve",
         "/remind ... -> set reminder",
         "/reminders, /cancelreminder <id> -> manage reminders",
         "/note <text>, /notes, /delnote <id> -> quick notes",
         "/agenda -> daily snapshot",
         "",
-        reminderUsageText()
+        reminderUsageText(),
+        "",
+        taskUsageText()
       ].join("\n"),
       menuKeyboard()
     );
@@ -595,8 +745,38 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     if (!chatId) {
       return;
     }
-    const tasks = store.listTasks(chatId);
+    const tasks = store.listTasks(chatId, true, 50);
     await ctx.reply(renderTaskList(tasks), menuKeyboard());
+  });
+
+  bot.command("taskprogress", async (ctx) => {
+    const chatId = resolveChatId(ctx);
+    if (!chatId) {
+      return;
+    }
+    const parts = ctx.message.text.trim().split(/\s+/);
+    const taskId = Number(parts[1]);
+    if (!Number.isInteger(taskId) || taskId <= 0) {
+      await ctx.reply("Usage: /taskprogress <task_id>");
+      return;
+    }
+    const ok = store.setTaskStatus(chatId, taskId, "in_progress");
+    await ctx.reply(ok ? `Task #${taskId} moved to in progress.` : "Task id not found.");
+  });
+
+  bot.command("tasktodo", async (ctx) => {
+    const chatId = resolveChatId(ctx);
+    if (!chatId) {
+      return;
+    }
+    const parts = ctx.message.text.trim().split(/\s+/);
+    const taskId = Number(parts[1]);
+    if (!Number.isInteger(taskId) || taskId <= 0) {
+      await ctx.reply("Usage: /tasktodo <task_id>");
+      return;
+    }
+    const ok = store.setTaskStatus(chatId, taskId, "todo");
+    await ctx.reply(ok ? `Task #${taskId} moved to todo.` : "Task id not found.");
   });
 
   bot.command("done", async (ctx) => {
@@ -613,6 +793,21 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
 
     const ok = store.markTaskDone(chatId, taskId);
     await ctx.reply(ok ? `Task #${taskId} marked done.` : "Task id not found.");
+  });
+
+  bot.command("taskremove", async (ctx) => {
+    const chatId = resolveChatId(ctx);
+    if (!chatId) {
+      return;
+    }
+    const parts = ctx.message.text.trim().split(/\s+/);
+    const taskId = Number(parts[1]);
+    if (!Number.isInteger(taskId) || taskId <= 0) {
+      await ctx.reply("Usage: /taskremove <task_id>");
+      return;
+    }
+    const ok = store.deleteTask(chatId, taskId);
+    await ctx.reply(ok ? `Task #${taskId} removed.` : "Task id not found.");
   });
 
   bot.command("alerts", async (ctx) => {
@@ -789,7 +984,31 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     if (!chatId) {
       return;
     }
-    await ctx.reply(renderTaskList(store.listTasks(chatId)), menuKeyboard());
+    await ctx.reply(renderTaskList(store.listTasks(chatId, true, 50)), menuKeyboard());
+  });
+
+  bot.action("task_progress_prompt", async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.reply(
+      "Send `/taskprogress <task_id>` or just say `start task <task_id>`.",
+      menuKeyboard()
+    );
+  });
+
+  bot.action("task_done_prompt", async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.reply(
+      "Send `/done <task_id>` or say `mark task <task_id> done`.",
+      menuKeyboard()
+    );
+  });
+
+  bot.action("task_delete_prompt", async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.reply(
+      "Send `/taskremove <task_id>` or say `delete task <task_id>`.",
+      menuKeyboard()
+    );
   });
 
   bot.action("reminder_create", async (ctx) => {
@@ -835,31 +1054,86 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
       return;
     }
 
-    const parsedReminder = parseNaturalReminder(text, new Date());
-    if (parsedReminder) {
-      if (parsedReminder.remindAt.getTime() <= Date.now()) {
-        await ctx.reply("Reminder time must be in the future.");
+    const action = parseAssistantAction(text, new Date());
+    if (action) {
+      if (action.type === "create_task") {
+        const id = store.createTask(chatId, action.text);
+        store.addMessage(chatId, "system", `Task #${id} created: ${action.text}`);
+        await ctx.reply(`Task created: #${id} ${action.text}`, menuKeyboard());
         return;
       }
-      const reminderId = store.createReminder(
-        chatId,
-        parsedReminder.text,
-        parsedReminder.remindAt.toISOString()
-      );
-      store.addMessage(
-        chatId,
-        "system",
-        `Reminder #${reminderId} created for ${formatUtc(parsedReminder.remindAt)}: ${
-          parsedReminder.text
-        }`
-      );
-      await ctx.reply(
-        `Reminder set: #${reminderId}\nWhen: ${formatUtc(parsedReminder.remindAt)}\nWhat: ${
-          parsedReminder.text
-        }`,
-        menuKeyboard()
-      );
-      return;
+
+      if (action.type === "update_task_status") {
+        const ok = store.setTaskStatus(chatId, action.taskId, action.status);
+        if (!ok) {
+          await ctx.reply("Task id not found.");
+          return;
+        }
+        const label =
+          action.status === "in_progress"
+            ? "in progress"
+            : action.status === "done"
+            ? "done"
+            : "todo";
+        await ctx.reply(`Task #${action.taskId} moved to ${label}.`, menuKeyboard());
+        return;
+      }
+
+      if (action.type === "delete_task") {
+        const ok = store.deleteTask(chatId, action.taskId);
+        await ctx.reply(ok ? `Task #${action.taskId} removed.` : "Task id not found.");
+        return;
+      }
+
+      if (action.type === "list_tasks") {
+        await ctx.reply(renderTaskList(store.listTasks(chatId, true, 50)), menuKeyboard());
+        return;
+      }
+
+      if (action.type === "create_note") {
+        const id = store.createNote(chatId, action.text);
+        await ctx.reply(`Note saved: #${id}`, menuKeyboard());
+        return;
+      }
+
+      if (action.type === "create_reminder") {
+        if (action.reminder.remindAt.getTime() <= Date.now()) {
+          await ctx.reply("Reminder time must be in the future.");
+          return;
+        }
+        const reminderId = store.createReminder(
+          chatId,
+          action.reminder.text,
+          action.reminder.remindAt.toISOString()
+        );
+        store.addMessage(
+          chatId,
+          "system",
+          `Reminder #${reminderId} created for ${formatUtc(action.reminder.remindAt)}: ${
+            action.reminder.text
+          }`
+        );
+        await ctx.reply(
+          `Reminder set: #${reminderId}\nWhen: ${formatUtc(action.reminder.remindAt)}\nWhat: ${
+            action.reminder.text
+          }`,
+          menuKeyboard()
+        );
+        return;
+      }
+
+      if (action.type === "list_reminders") {
+        await ctx.reply(
+          renderReminderList(store.listUpcomingReminders(chatId, 20)),
+          menuKeyboard()
+        );
+        return;
+      }
+
+      if (action.type === "show_agenda") {
+        await ctx.reply(renderAgenda(store, chatId), menuKeyboard());
+        return;
+      }
     }
 
     store.addMessage(chatId, "user", text);

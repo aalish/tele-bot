@@ -53,8 +53,11 @@ Your `PUBLIC_BASE_URL` must be HTTPS and reachable by Telegram.
 - `/login <password>` to unlock access when password mode is enabled
 - `/logout` to remove saved login
 - `task: buy milk` to create a task
-- `/tasks` to list tasks
+- `/tasks` to show task board (`todo` / `in_progress` / `done`)
+- `/taskprogress 3` to move task `#3` to in progress
+- `/tasktodo 3` to move task `#3` back to todo
 - `/done 3` to mark task `#3` done
+- `/taskremove 3` to delete task `#3` (it will not show again)
 - `/alerts` to list recent alert history
 - `/alertresolve 12` to manually mark local alert `#12` resolved
 - `/remind in 30m drink water` to set reminder
@@ -66,6 +69,12 @@ Your `PUBLIC_BASE_URL` must be HTTPS and reachable by Telegram.
 - `/delnote 4` to delete note `#4`
 - `/agenda` to view tasks + reminders + open alerts + notes snapshot
 - Natural reminder text also works (example: `remind me to stretch in 20 minutes`)
+- Natural command-style chat also works:
+  - `add task submit report`
+  - `start task 3`
+  - `mark task 3 done`
+  - `delete task 3`
+  - `show tasks`
 - Send regular text questions; bot replies using chat memory
 
 ### Send personal message via API
