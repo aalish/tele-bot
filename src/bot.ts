@@ -10,6 +10,18 @@ type BotDeps = {
   assistant: AssistantEngine;
 };
 
+function logDebug(enabled: boolean, message: string, details?: Record<string, unknown>) {
+  if (!enabled) {
+    return;
+  }
+  const timestamp = new Date().toISOString();
+  if (details && Object.keys(details).length > 0) {
+    console.log(`[debug][${timestamp}] ${message}`, details);
+    return;
+  }
+  console.log(`[debug][${timestamp}] ${message}`);
+}
+
 function menuKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("Create task", "task_create")],
@@ -137,6 +149,33 @@ function buildUnauthorizedMessage(config: AppConfig): string {
 export function createBot({ config, store, assistant }: BotDeps): Telegraf {
   const bot = new Telegraf(config.botToken);
 
+  bot.catch((error, ctx) => {
+    console.error("Telegram update handling error:", error);
+    logDebug(config.debugMode, "Update caused error", {
+      update_id: ctx.update.update_id
+    });
+  });
+
+  bot.use(async (ctx, next) => {
+    if (config.debugMode) {
+      const messageText = resolveIncomingText(ctx);
+      const callbackData = (ctx.callbackQuery &&
+      "data" in ctx.callbackQuery &&
+      typeof ctx.callbackQuery.data === "string"
+        ? ctx.callbackQuery.data
+        : undefined) as string | undefined;
+      logDebug(config.debugMode, "Incoming Telegram update", {
+        update_id: ctx.update.update_id,
+        type: ctx.updateType,
+        user_id: resolveUserId(ctx),
+        chat_id: resolveChatId(ctx),
+        message_preview: messageText ? messageText.slice(0, 120) : undefined,
+        callback_data: callbackData
+      });
+    }
+    await next();
+  });
+
   bot.use(async (ctx, next) => {
     const userId = resolveUserId(ctx);
     if (!userId || !hasAuthRestrictions(config) || isUserAuthorized(userId, config, store)) {
@@ -152,11 +191,19 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
 
     if (ctx.callbackQuery) {
       await ctx.answerCbQuery("Access denied");
+      logDebug(config.debugMode, "Unauthorized callback blocked", {
+        user_id: userId,
+        update_id: ctx.update.update_id
+      });
       return;
     }
 
     if (text) {
       await ctx.reply(buildUnauthorizedMessage(config));
+      logDebug(config.debugMode, "Unauthorized message blocked", {
+        user_id: userId,
+        update_id: ctx.update.update_id
+      });
     }
   });
 
@@ -331,6 +378,11 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     const answer = await assistant.answer(chatId, text);
     store.addMessage(chatId, "assistant", answer);
     await ctx.reply(answer, menuKeyboard());
+    logDebug(config.debugMode, "Answered message", {
+      chat_id: chatId,
+      user_id: resolveUserId(ctx),
+      update_id: ctx.update.update_id
+    });
   });
 
   return bot;

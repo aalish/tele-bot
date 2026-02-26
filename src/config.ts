@@ -15,6 +15,7 @@ const envSchema = z.object({
   INTERNAL_API_KEY: z.string().optional(),
   ALLOWED_TELEGRAM_USER_IDS: z.string().default(""),
   BOT_PASSWORD: z.string().optional(),
+  DEBUG_MODE: z.string().optional(),
   AI_PROVIDER: z.enum(["auto", "openai", "gemini", "none"]).default("auto"),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default("gpt-4o-mini"),
@@ -35,6 +36,7 @@ export type AppConfig = {
   internalApiKey?: string;
   allowedTelegramUserIds: ReadonlySet<string>;
   botPassword?: string;
+  debugMode: boolean;
   aiProvider: AiProvider;
   openAiApiKey?: string;
   openAiModel: string;
@@ -60,6 +62,19 @@ function parseIdSet(value: string): ReadonlySet<string> {
       .split(",")
       .map((v) => v.trim())
       .filter(Boolean)
+  );
+}
+
+function parseBoolean(value?: string): boolean {
+  if (!value) {
+    return false;
+  }
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized === "1" ||
+    normalized === "true" ||
+    normalized === "yes" ||
+    normalized === "on"
   );
 }
 
@@ -116,6 +131,7 @@ export function loadConfig(): AppConfig {
     internalApiKey: env.INTERNAL_API_KEY,
     allowedTelegramUserIds: parseIdSet(env.ALLOWED_TELEGRAM_USER_IDS),
     botPassword: env.BOT_PASSWORD,
+    debugMode: parseBoolean(env.DEBUG_MODE),
     aiProvider: resolveAiProvider(env.AI_PROVIDER, env.OPENAI_API_KEY, env.GEMINI_API_KEY),
     openAiApiKey: env.OPENAI_API_KEY,
     openAiModel: env.OPENAI_MODEL,

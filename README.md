@@ -83,6 +83,9 @@ Set bot target chat IDs via:
 ## Notes
 
 - Memory persists in SQLite at `DATABASE_PATH` (default `./data/bot.db`).
+- Debug mode:
+  - Set `DEBUG_MODE=true` to log webhook/API requests and Telegram update flow.
+  - Use `GET /debug/webhook-info` to inspect Telegram webhook state (`x-api-key` required when `INTERNAL_API_KEY` is set).
 - Access control:
   - `ALLOWED_TELEGRAM_USER_IDS=12345,67890` restricts usage to listed Telegram `user_id` values.
   - `BOT_PASSWORD=...` enables password login via `/login <password>`.

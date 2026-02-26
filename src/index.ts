@@ -15,14 +15,59 @@ function makeErrorResponse(message: string, details?: unknown) {
   return { ok: false, message, details };
 }
 
+function logDebug(enabled: boolean, message: string, details?: Record<string, unknown>) {
+  if (!enabled) {
+    return;
+  }
+  const timestamp = new Date().toISOString();
+  if (details && Object.keys(details).length > 0) {
+    console.log(`[debug][${timestamp}] ${message}`, details);
+    return;
+  }
+  console.log(`[debug][${timestamp}] ${message}`);
+}
+
 async function main(): Promise<void> {
   const config = loadConfig();
   const store = new BotStore(config.databasePath);
   const assistant = new AssistantEngine({ config, store });
   const bot = createBot({ config, store, assistant });
   const app = express();
+  const webhookPath = `/webhooks/telegram/${config.telegramWebhookPathSecret}`;
 
   app.use(express.json({ limit: "1mb" }));
+
+  app.use((req, res, next) => {
+    if (!config.debugMode) {
+      next();
+      return;
+    }
+    const start = Date.now();
+    const isTrackedPath =
+      req.path === webhookPath ||
+      req.path === "/webhooks/alertmanager" ||
+      req.path === "/api/send-personal";
+    if (isTrackedPath) {
+      const body = req.body as Record<string, unknown> | undefined;
+      logDebug(config.debugMode, "Incoming request", {
+        method: req.method,
+        path: req.path,
+        hasBody: Boolean(body),
+        bodyKeys: body && typeof body === "object" ? Object.keys(body).slice(0, 10) : []
+      });
+    }
+    res.on("finish", () => {
+      if (isTrackedPath) {
+        logDebug(config.debugMode, "Request completed", {
+          method: req.method,
+          path: req.path,
+          status: res.statusCode,
+          durationMs: Date.now() - start
+        });
+      }
+    });
+    next();
+  });
 
   app.get("/healthz", (_req, res) => {
     res.json({ ok: true });
@@ -32,6 +77,7 @@ async function main(): Promise<void> {
     if (config.internalApiKey) {
       const provided = req.headers["x-api-key"];
       if (provided !== config.internalApiKey) {
+        logDebug(config.debugMode, "send-personal unauthorized");
         res.status(401).json(makeErrorResponse("Unauthorized"));
         return;
       }
@@ -67,6 +113,10 @@ async function main(): Promise<void> {
     }
 
     const text = formatAlertMessage(parsed.data);
+    logDebug(config.debugMode, "Alertmanager payload accepted", {
+      alerts: parsed.data.alerts.length,
+      status: parsed.data.status
+    });
 
     const results = await Promise.allSettled(
       config.alertChatIds.map(async (chatId) => {
@@ -92,8 +142,24 @@ async function main(): Promise<void> {
     });
   });
 
-  const webhookPath = `/webhooks/telegram/${config.telegramWebhookPathSecret}`;
   app.use(webhookPath, bot.webhookCallback(webhookPath));
+
+  app.get("/debug/webhook-info", async (req, res) => {
+    if (config.internalApiKey) {
+      const provided = req.headers["x-api-key"];
+      if (provided !== config.internalApiKey) {
+        res.status(401).json(makeErrorResponse("Unauthorized"));
+        return;
+      }
+    }
+    try {
+      const info = await bot.telegram.getWebhookInfo();
+      res.json({ ok: true, info });
+    } catch (error) {
+      console.error("getWebhookInfo failed:", error);
+      res.status(500).json(makeErrorResponse("Failed to fetch webhook info"));
+    }
+  });
 
   app.use((error: Error, _req: Request, res: Response, _next: NextFunction) => {
     console.error("Unhandled HTTP error:", error);
@@ -103,6 +169,7 @@ async function main(): Promise<void> {
   const server = app.listen(config.port, async () => {
     const webhookUrl = `${config.publicBaseUrl}${webhookPath}`;
     try {
+      logDebug(config.debugMode, "Attempting setWebhook", { webhookUrl });
       await bot.telegram.setWebhook(webhookUrl);
       await bot.telegram.setMyCommands([
         { command: "start", description: "Initialize bot" },
@@ -115,6 +182,17 @@ async function main(): Promise<void> {
       ]);
       console.log(`Server listening on :${config.port}`);
       console.log(`Telegram webhook set to: ${webhookUrl}`);
+      if (config.debugMode) {
+        const webhookInfo = await bot.telegram.getWebhookInfo();
+        logDebug(config.debugMode, "Telegram webhook info", {
+          url: webhookInfo.url,
+          pending_update_count: webhookInfo.pending_update_count,
+          last_error_date: webhookInfo.last_error_date,
+          last_error_message: webhookInfo.last_error_message,
+          max_connections: webhookInfo.max_connections,
+          ip_address: webhookInfo.ip_address
+        });
+      }
     } catch (error) {
       console.error("Webhook setup failed:", error);
     }
