@@ -64,6 +64,10 @@ function menuKeyboard() {
   ]);
 }
 
+function menuMarkup(config: AppConfig) {
+  return config.showMenuButtons ? menuKeyboard() : undefined;
+}
+
 function renderTaskList(tasks: TaskItem[]): string {
   if (tasks.length === 0) {
     return "No tasks found.";
@@ -233,6 +237,7 @@ function isPublicCommand(text: string): boolean {
   return (
     startsWithCommand(text, "start") ||
     startsWithCommand(text, "help") ||
+    startsWithCommand(text, "menu") ||
     startsWithCommand(text, "myid") ||
     startsWithCommand(text, "login")
   );
@@ -311,6 +316,25 @@ function buildUtcDate(
   return candidate;
 }
 
+function nextUtcDateForClock(now: Date, hour: number, minute: number): Date {
+  const base = new Date(now);
+  let target = new Date(
+    Date.UTC(
+      base.getUTCFullYear(),
+      base.getUTCMonth(),
+      base.getUTCDate(),
+      hour,
+      minute,
+      0,
+      0
+    )
+  );
+  if (target.getTime() <= now.getTime()) {
+    target = new Date(target.getTime() + 24 * 60 * 60 * 1000);
+  }
+  return target;
+}
+
 function durationToMs(amount: number, unitRaw: string): number | null {
   const unit = unitRaw.toLowerCase();
   if (["m", "min", "mins", "minute", "minutes"].includes(unit)) {
@@ -327,12 +351,12 @@ function durationToMs(amount: number, unitRaw: string): number | null {
 
 function parseReminderFromCommand(args: string, now: Date): ParsedReminder | null {
   const relativeMatch = args.match(
-    /^in\s+(\d+)\s*(m|min|mins|minute|minutes|h|hr|hour|hours|d|day|days)\s+(.+)$/i
+    /^in\s+(\d+)\s*(m|min|mins|minute|minutes|h|hr|hour|hours|d|day|days)(?:\s+(.+))?$/i
   );
   if (relativeMatch) {
     const amount = Number(relativeMatch[1]);
-    const text = relativeMatch[3]?.trim();
-    if (!Number.isInteger(amount) || amount <= 0 || !text) {
+    const text = relativeMatch[3]?.trim() || "Reminder";
+    if (!Number.isInteger(amount) || amount <= 0) {
       return null;
     }
     const ms = durationToMs(amount, relativeMatch[2]);
@@ -346,7 +370,7 @@ function parseReminderFromCommand(args: string, now: Date): ParsedReminder | nul
   }
 
   const absoluteMatch = args.match(
-    /^at\s+(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})\s+(.+)$/i
+    /^at\s+(\d{4})-(\d{2})-(\d{2})\s+(\d{1,2}):(\d{2})(?:\s+(.+))?$/i
   );
   if (absoluteMatch) {
     const year = Number(absoluteMatch[1]);
@@ -354,8 +378,8 @@ function parseReminderFromCommand(args: string, now: Date): ParsedReminder | nul
     const day = Number(absoluteMatch[3]);
     const hour = Number(absoluteMatch[4]);
     const minute = Number(absoluteMatch[5]);
-    const text = absoluteMatch[6]?.trim();
-    if (!text || hour > 23 || minute > 59) {
+    const text = absoluteMatch[6]?.trim() || "Reminder";
+    if (hour > 23 || minute > 59) {
       return null;
     }
     const remindAt = buildUtcDate(year, month, day, hour, minute);
@@ -363,6 +387,39 @@ function parseReminderFromCommand(args: string, now: Date): ParsedReminder | nul
       return null;
     }
     return { text, remindAt };
+  }
+
+  const ampmMatch = args.match(
+    /^at\s+(\d{1,2}):(\d{2})\s*(am|pm)(?:\s+(.+))?$/i
+  );
+  if (ampmMatch) {
+    const hour12 = Number(ampmMatch[1]);
+    const minute = Number(ampmMatch[2]);
+    const ampm = ampmMatch[3]?.toLowerCase();
+    const text = ampmMatch[4]?.trim() || "Reminder";
+    if (hour12 < 1 || hour12 > 12 || minute > 59) {
+      return null;
+    }
+    let hour = hour12 % 12;
+    if (ampm === "pm") {
+      hour += 12;
+    }
+    const remindAt = nextUtcDateForClock(now, hour, minute);
+    return { text, remindAt };
+  }
+
+  const clockMatch = args.match(/^at\s+(\d{1,2}):(\d{2})(?:\s+(.+))?$/i);
+  if (clockMatch) {
+    const hour = Number(clockMatch[1]);
+    const minute = Number(clockMatch[2]);
+    const text = clockMatch[3]?.trim() || "Reminder";
+    if (hour > 23 || minute > 59) {
+      return null;
+    }
+    return {
+      text,
+      remindAt: nextUtcDateForClock(now, hour, minute)
+    };
   }
 
   return null;
@@ -373,10 +430,16 @@ function parseNaturalReminder(text: string, now: Date): ParsedReminder | null {
     /^remind me to\s+(.+?)\s+in\s+(\d+)\s*(m|min|mins|minute|minutes|h|hr|hour|hours|d|day|days)\.?$/i;
   const relativePattern2 =
     /^remind me in\s+(\d+)\s*(m|min|mins|minute|minutes|h|hr|hour|hours|d|day|days)\s+to\s+(.+?)\.?$/i;
+  const relativePattern3 =
+    /^remind me in\s+(\d+)\s*(m|min|mins|minute|minutes|h|hr|hour|hours|d|day|days)\.?$/i;
+  const addReminderRelative =
+    /^(?:add|set|create)\s+reminder\s+in\s+(\d+)\s*(m|min|mins|minute|minutes|h|hr|hour|hours|d|day|days)(?:\s+(.+))?$/i;
   const absolutePattern1 =
     /^remind me to\s+(.+?)\s+(today|tomorrow)\s+at\s+(\d{1,2}):(\d{2})\.?$/i;
   const absolutePattern2 =
     /^remind me to\s+(.+?)\s+at\s+(\d{1,2}):(\d{2})\.?$/i;
+  const addReminderAbsolute =
+    /^(?:add|set|create)\s+reminder\s+at\s+(\d{1,2}):(\d{2})\s*(am|pm)?(?:\s+(.+))?$/i;
 
   const match1 = text.match(relativePattern1);
   if (match1) {
@@ -412,12 +475,45 @@ function parseNaturalReminder(text: string, now: Date): ParsedReminder | null {
     };
   }
 
-  const match3 = text.match(absolutePattern1);
+  const match3 = text.match(relativePattern3);
   if (match3) {
-    const reminderText = match3[1]?.trim();
-    const dayMode = match3[2]?.toLowerCase();
-    const hour = Number(match3[3]);
-    const minute = Number(match3[4]);
+    const amount = Number(match3[1]);
+    if (!Number.isInteger(amount) || amount <= 0) {
+      return null;
+    }
+    const ms = durationToMs(amount, match3[2]);
+    if (!ms) {
+      return null;
+    }
+    return {
+      text: "Reminder",
+      remindAt: new Date(now.getTime() + ms)
+    };
+  }
+
+  const match4 = text.match(addReminderRelative);
+  if (match4) {
+    const amount = Number(match4[1]);
+    const reminderText = match4[3]?.trim() || "Reminder";
+    if (!Number.isInteger(amount) || amount <= 0) {
+      return null;
+    }
+    const ms = durationToMs(amount, match4[2]);
+    if (!ms) {
+      return null;
+    }
+    return {
+      text: reminderText,
+      remindAt: new Date(now.getTime() + ms)
+    };
+  }
+
+  const match5 = text.match(absolutePattern1);
+  if (match5) {
+    const reminderText = match5[1]?.trim();
+    const dayMode = match5[2]?.toLowerCase();
+    const hour = Number(match5[3]);
+    const minute = Number(match5[4]);
     if (!reminderText || hour > 23 || minute > 59) {
       return null;
     }
@@ -437,30 +533,45 @@ function parseNaturalReminder(text: string, now: Date): ParsedReminder | null {
     return { text: reminderText, remindAt: target };
   }
 
-  const match4 = text.match(absolutePattern2);
-  if (match4) {
-    const reminderText = match4[1]?.trim();
-    const hour = Number(match4[2]);
-    const minute = Number(match4[3]);
+  const match6 = text.match(absolutePattern2);
+  if (match6) {
+    const reminderText = match6[1]?.trim();
+    const hour = Number(match6[2]);
+    const minute = Number(match6[3]);
     if (!reminderText || hour > 23 || minute > 59) {
       return null;
     }
-    const base = new Date(now);
-    let target = new Date(
-      Date.UTC(
-        base.getUTCFullYear(),
-        base.getUTCMonth(),
-        base.getUTCDate(),
-        hour,
-        minute,
-        0,
-        0
-      )
-    );
-    if (target.getTime() <= now.getTime()) {
-      target = new Date(target.getTime() + 24 * 60 * 60 * 1000);
-    }
+    const target = nextUtcDateForClock(now, hour, minute);
     return { text: reminderText, remindAt: target };
+  }
+
+  const match7 = text.match(addReminderAbsolute);
+  if (match7) {
+    const hourRaw = Number(match7[1]);
+    const minute = Number(match7[2]);
+    const ampm = match7[3]?.toLowerCase();
+    const reminderText = match7[4]?.trim() || "Reminder";
+    if (minute > 59) {
+      return null;
+    }
+
+    let hour = hourRaw;
+    if (ampm) {
+      if (hourRaw < 1 || hourRaw > 12) {
+        return null;
+      }
+      hour = hourRaw % 12;
+      if (ampm === "pm") {
+        hour += 12;
+      }
+    } else if (hourRaw > 23) {
+      return null;
+    }
+
+    return {
+      text: reminderText,
+      remindAt: nextUtcDateForClock(now, hour, minute)
+    };
   }
 
   return null;
@@ -470,9 +581,12 @@ function reminderUsageText(): string {
   return [
     "Reminder formats:",
     "/remind in 30m drink water",
+    "/remind in 1m",
     "/remind in 2h call mom",
     "/remind at 2026-03-01 09:00 pay rent (UTC)",
-    'Natural text: "remind me to stretch in 20 minutes"'
+    "/remind at 11:29 PM take medicine",
+    'Natural text: "remind me to stretch in 20 minutes"',
+    'Natural text: "add reminder in 1 min 11:29 PM"'
   ].join("\n");
 }
 
@@ -649,6 +763,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
         "Bot is ready.",
         "Commands:",
         "/myid - show your user_id and chat_id",
+        "/menu - show quick action buttons",
         "/login <password> - unlock bot access (when enabled)",
         "/logout - remove saved login (when enabled)",
         "/tasks - show task board",
@@ -663,7 +778,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
         "/note <text> - save quick note",
         "Use `task: <text>` to create a task."
       ].join("\n"),
-      menuKeyboard()
+      menuMarkup(config)
     );
   });
 
@@ -683,13 +798,18 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
         "/reminders, /cancelreminder <id> -> manage reminders",
         "/note <text>, /notes, /delnote <id> -> quick notes",
         "/agenda -> daily snapshot",
+        "/menu -> show action buttons when needed",
         "",
         reminderUsageText(),
         "",
         taskUsageText()
       ].join("\n"),
-      menuKeyboard()
+      menuMarkup(config)
     );
+  });
+
+  bot.command("menu", async (ctx) => {
+    await ctx.reply("Quick actions", menuKeyboard());
   });
 
   bot.command("myid", async (ctx) => {
@@ -722,7 +842,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     }
 
     store.authorizeUser(userId);
-    await ctx.reply("Login successful. You can use the bot now.", menuKeyboard());
+    await ctx.reply("Login successful. You can use the bot now.", menuMarkup(config));
   });
 
   bot.command("logout", async (ctx) => {
@@ -746,7 +866,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
       return;
     }
     const tasks = store.listTasks(chatId, true, 50);
-    await ctx.reply(renderTaskList(tasks), menuKeyboard());
+    await ctx.reply(renderTaskList(tasks), menuMarkup(config));
   });
 
   bot.command("taskprogress", async (ctx) => {
@@ -816,7 +936,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
       return;
     }
     const alerts = store.listAlerts(chatId, 20);
-    await ctx.reply(renderAlertList(alerts), menuKeyboard());
+    await ctx.reply(renderAlertList(alerts), menuMarkup(config));
   });
 
   bot.command("alertresolve", async (ctx) => {
@@ -838,7 +958,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     }
     await ctx.reply(
       `Alert #${alertId} marked resolved locally.\nNote: this does not close Grafana incident state by itself.`,
-      menuKeyboard()
+      menuMarkup(config)
     );
   });
 
@@ -869,7 +989,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     );
     await ctx.reply(
       `Reminder set: #${id}\nWhen: ${formatUtc(parsed.remindAt)}\nWhat: ${parsed.text}`,
-      menuKeyboard()
+      menuMarkup(config)
     );
   });
 
@@ -878,7 +998,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     if (!chatId) {
       return;
     }
-    await ctx.reply(renderReminderList(store.listUpcomingReminders(chatId, 20)), menuKeyboard());
+    await ctx.reply(renderReminderList(store.listUpcomingReminders(chatId, 20)), menuMarkup(config));
   });
 
   bot.command("cancelreminder", async (ctx) => {
@@ -907,7 +1027,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
       return;
     }
     const id = store.createNote(chatId, text);
-    await ctx.reply(`Note saved: #${id}`, menuKeyboard());
+    await ctx.reply(`Note saved: #${id}`, menuMarkup(config));
   });
 
   bot.command("notes", async (ctx) => {
@@ -915,7 +1035,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     if (!chatId) {
       return;
     }
-    await ctx.reply(renderNotesList(store.listNotes(chatId, 20)), menuKeyboard());
+    await ctx.reply(renderNotesList(store.listNotes(chatId, 20)), menuMarkup(config));
   });
 
   bot.command("delnote", async (ctx) => {
@@ -938,7 +1058,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     if (!chatId) {
       return;
     }
-    await ctx.reply(renderAgenda(store, chatId), menuKeyboard());
+    await ctx.reply(renderAgenda(store, chatId), menuMarkup(config));
   });
 
   bot.hears(/^task:\s*(.+)$/i, async (ctx) => {
@@ -955,7 +1075,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
 
     const id = store.createTask(chatId, text);
     store.addMessage(chatId, "system", `Task #${id} created: ${text}`);
-    await ctx.reply(`Task created: #${id} ${text}`, menuKeyboard());
+    await ctx.reply(`Task created: #${id} ${text}`, menuMarkup(config));
   });
 
   bot.hears(/^note:\s*(.+)$/i, async (ctx) => {
@@ -970,7 +1090,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
       return;
     }
     const id = store.createNote(chatId, text);
-    await ctx.reply(`Note saved: #${id}`, menuKeyboard());
+    await ctx.reply(`Note saved: #${id}`, menuMarkup(config));
   });
 
   bot.action("task_create", async (ctx) => {
@@ -984,14 +1104,14 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     if (!chatId) {
       return;
     }
-    await ctx.reply(renderTaskList(store.listTasks(chatId, true, 50)), menuKeyboard());
+    await ctx.reply(renderTaskList(store.listTasks(chatId, true, 50)), menuMarkup(config));
   });
 
   bot.action("task_progress_prompt", async (ctx) => {
     await ctx.answerCbQuery();
     await ctx.reply(
       "Send `/taskprogress <task_id>` or just say `start task <task_id>`.",
-      menuKeyboard()
+      menuMarkup(config)
     );
   });
 
@@ -999,7 +1119,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     await ctx.answerCbQuery();
     await ctx.reply(
       "Send `/done <task_id>` or say `mark task <task_id> done`.",
-      menuKeyboard()
+      menuMarkup(config)
     );
   });
 
@@ -1007,7 +1127,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     await ctx.answerCbQuery();
     await ctx.reply(
       "Send `/taskremove <task_id>` or say `delete task <task_id>`.",
-      menuKeyboard()
+      menuMarkup(config)
     );
   });
 
@@ -1022,7 +1142,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     if (!chatId) {
       return;
     }
-    await ctx.reply(renderAlertList(store.listAlerts(chatId, 20)), menuKeyboard());
+    await ctx.reply(renderAlertList(store.listAlerts(chatId, 20)), menuMarkup(config));
   });
 
   bot.action("agenda_show", async (ctx) => {
@@ -1031,7 +1151,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     if (!chatId) {
       return;
     }
-    await ctx.reply(renderAgenda(store, chatId), menuKeyboard());
+    await ctx.reply(renderAgenda(store, chatId), menuMarkup(config));
   });
 
   bot.action("context_clear", async (ctx) => {
@@ -1041,7 +1161,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
       return;
     }
     const deleted = store.clearMessages(chatId);
-    await ctx.reply(`Context cleared (${deleted} messages).`, menuKeyboard());
+    await ctx.reply(`Context cleared (${deleted} messages).`, menuMarkup(config));
   });
 
   bot.on(message("text"), async (ctx) => {
@@ -1059,7 +1179,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
       if (action.type === "create_task") {
         const id = store.createTask(chatId, action.text);
         store.addMessage(chatId, "system", `Task #${id} created: ${action.text}`);
-        await ctx.reply(`Task created: #${id} ${action.text}`, menuKeyboard());
+        await ctx.reply(`Task created: #${id} ${action.text}`, menuMarkup(config));
         return;
       }
 
@@ -1075,7 +1195,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
             : action.status === "done"
             ? "done"
             : "todo";
-        await ctx.reply(`Task #${action.taskId} moved to ${label}.`, menuKeyboard());
+        await ctx.reply(`Task #${action.taskId} moved to ${label}.`, menuMarkup(config));
         return;
       }
 
@@ -1086,13 +1206,13 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
       }
 
       if (action.type === "list_tasks") {
-        await ctx.reply(renderTaskList(store.listTasks(chatId, true, 50)), menuKeyboard());
+        await ctx.reply(renderTaskList(store.listTasks(chatId, true, 50)), menuMarkup(config));
         return;
       }
 
       if (action.type === "create_note") {
         const id = store.createNote(chatId, action.text);
-        await ctx.reply(`Note saved: #${id}`, menuKeyboard());
+        await ctx.reply(`Note saved: #${id}`, menuMarkup(config));
         return;
       }
 
@@ -1117,7 +1237,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
           `Reminder set: #${reminderId}\nWhen: ${formatUtc(action.reminder.remindAt)}\nWhat: ${
             action.reminder.text
           }`,
-          menuKeyboard()
+          menuMarkup(config)
         );
         return;
       }
@@ -1125,13 +1245,13 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
       if (action.type === "list_reminders") {
         await ctx.reply(
           renderReminderList(store.listUpcomingReminders(chatId, 20)),
-          menuKeyboard()
+          menuMarkup(config)
         );
         return;
       }
 
       if (action.type === "show_agenda") {
-        await ctx.reply(renderAgenda(store, chatId), menuKeyboard());
+        await ctx.reply(renderAgenda(store, chatId), menuMarkup(config));
         return;
       }
     }
@@ -1139,7 +1259,7 @@ export function createBot({ config, store, assistant }: BotDeps): Telegraf {
     store.addMessage(chatId, "user", text);
     const answer = await assistant.answer(chatId, text);
     store.addMessage(chatId, "assistant", answer);
-    await ctx.reply(answer, menuKeyboard());
+    await ctx.reply(answer, menuMarkup(config));
     logDebug(config.debugMode, "Answered message", {
       chat_id: chatId,
       user_id: resolveUserId(ctx),

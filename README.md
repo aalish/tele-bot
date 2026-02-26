@@ -50,6 +50,7 @@ Your `PUBLIC_BASE_URL` must be HTTPS and reachable by Telegram.
 
 - `/start` to initialize
 - `/myid` to get `user_id` and `chat_id`
+- `/menu` to show quick action buttons on demand
 - `/login <password>` to unlock access when password mode is enabled
 - `/logout` to remove saved login
 - `task: buy milk` to create a task
@@ -68,7 +69,9 @@ Your `PUBLIC_BASE_URL` must be HTTPS and reachable by Telegram.
 - `/notes` to list notes
 - `/delnote 4` to delete note `#4`
 - `/agenda` to view tasks + reminders + open alerts + notes snapshot
-- Natural reminder text also works (example: `remind me to stretch in 20 minutes`)
+- Natural reminder text also works:
+  - `remind me to stretch in 20 minutes`
+  - `add reminder in 1 min 11:29 PM`
 - Natural command-style chat also works:
   - `add task submit report`
   - `start task 3`
@@ -110,6 +113,9 @@ Set bot target chat IDs via:
 - Debug mode:
   - Set `DEBUG_MODE=true` to log webhook/API requests and Telegram update flow.
   - Use `GET /debug/webhook-info` to inspect Telegram webhook state (`x-api-key` required when `INTERNAL_API_KEY` is set).
+- Cleaner chat mode:
+  - Set `SHOW_MENU_BUTTONS=false` (default) to hide action buttons in every reply.
+  - Use `/menu` whenever you want the buttons temporarily.
 - Reminder scheduler:
   - Set `REMINDER_CHECK_INTERVAL_SECONDS` (default `30`) for reminder delivery frequency.
   - Reminders are delivered by a background loop even when no new chat message arrives.

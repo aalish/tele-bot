@@ -245,6 +245,7 @@ async function main(): Promise<void> {
       await bot.telegram.setWebhook(webhookUrl);
       await bot.telegram.setMyCommands([
         { command: "start", description: "Initialize bot" },
+        { command: "menu", description: "Show quick action buttons" },
         { command: "myid", description: "Show user_id and chat_id" },
         { command: "login", description: "Authenticate with password" },
         { command: "logout", description: "Clear saved login" },
