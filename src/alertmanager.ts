@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 
 const singleAlertSchema = z.object({
   status: z.string().optional(),
+  fingerprint: z.string().optional(),
   labels: z.record(z.string()).default({}),
   annotations: z.record(z.string()).default({}),
   startsAt: z.string().optional(),
@@ -22,11 +24,64 @@ export const alertmanagerPayloadSchema = z
 
 type AlertPayload = z.infer<typeof alertmanagerPayloadSchema>;
 
+export type NormalizedAlertEvent = {
+  fingerprint: string;
+  status: "firing" | "resolved";
+  alertname: string;
+  instance: string;
+  severity: string;
+  summary: string;
+  startsAt: string;
+  endsAt: string;
+  source: string;
+};
+
 function maybeLine(label: string, value: string | undefined): string | null {
   if (!value) {
     return null;
   }
   return `${label}: ${value}`;
+}
+
+function normalizeStatus(value?: string): "firing" | "resolved" {
+  return value?.toLowerCase() === "resolved" ? "resolved" : "firing";
+}
+
+function fallbackFingerprint(parts: string[]): string {
+  return createHash("sha256").update(parts.join("|")).digest("hex");
+}
+
+export function normalizeAlertEvents(payload: AlertPayload): NormalizedAlertEvent[] {
+  return payload.alerts.map((alert) => {
+    const alertname = alert.labels.alertname ?? payload.commonLabels.alertname ?? "alert";
+    const instance = alert.labels.instance ?? payload.commonLabels.instance ?? "-";
+    const severity = alert.labels.severity ?? payload.commonLabels.severity ?? "unknown";
+    const summary =
+      alert.annotations.summary ??
+      alert.annotations.description ??
+      payload.commonAnnotations.summary ??
+      payload.commonAnnotations.description ??
+      "(no summary)";
+    const startsAt = alert.startsAt ?? new Date().toISOString();
+    const endsAt = alert.endsAt ?? "";
+    const source = alert.generatorURL ?? payload.externalURL ?? "";
+    const status = normalizeStatus(alert.status ?? payload.status);
+    const fingerprint =
+      alert.fingerprint ??
+      fallbackFingerprint([alertname, instance, severity, summary, startsAt]);
+
+    return {
+      fingerprint,
+      status,
+      alertname,
+      instance,
+      severity,
+      summary,
+      startsAt,
+      endsAt,
+      source
+    };
+  });
 }
 
 export function formatAlertMessage(payload: AlertPayload): string {

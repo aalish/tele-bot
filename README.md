@@ -4,9 +4,10 @@ This project gives you a Telegram bot with these goals covered:
 
 1. Send personal messages (`/api/send-personal`)
 2. Interactive behavior (commands + inline buttons)
-3. Context memory for conversations + tasks (SQLite)
+3. Context memory for conversations + tasks/reminders/notes/alerts (SQLite)
 4. Webhook-triggered Telegram updates
 5. Grafana Alertmanager webhook compatibility
+6. Day-to-day assistant features (reminders, notes, agenda, alert history)
 
 ## Stack
 
@@ -54,6 +55,17 @@ Your `PUBLIC_BASE_URL` must be HTTPS and reachable by Telegram.
 - `task: buy milk` to create a task
 - `/tasks` to list tasks
 - `/done 3` to mark task `#3` done
+- `/alerts` to list recent alert history
+- `/alertresolve 12` to manually mark local alert `#12` resolved
+- `/remind in 30m drink water` to set reminder
+- `/remind at 2026-03-01 09:00 pay rent` to set UTC reminder
+- `/reminders` to list pending reminders
+- `/cancelreminder 2` to cancel reminder `#2`
+- `/note call electrician` to save quick note
+- `/notes` to list notes
+- `/delnote 4` to delete note `#4`
+- `/agenda` to view tasks + reminders + open alerts + notes snapshot
+- Natural reminder text also works (example: `remind me to stretch in 20 minutes`)
 - Send regular text questions; bot replies using chat memory
 
 ### Send personal message via API
@@ -79,6 +91,9 @@ Set bot target chat IDs via:
 
 - Use group chat IDs (usually start with `-100`) for channel/group notifications.
 - Use `/myid` in private chat to get a personal chat ID.
+- Incoming firing/resolved alerts are persisted in SQLite with stable IDs.
+- Resolved alerts from Grafana/Alertmanager automatically update stored alert state.
+- `/alertresolve <id>` is a local manual resolution marker and does not close Grafana incident state by itself.
 
 ## Notes
 
@@ -86,6 +101,9 @@ Set bot target chat IDs via:
 - Debug mode:
   - Set `DEBUG_MODE=true` to log webhook/API requests and Telegram update flow.
   - Use `GET /debug/webhook-info` to inspect Telegram webhook state (`x-api-key` required when `INTERNAL_API_KEY` is set).
+- Reminder scheduler:
+  - Set `REMINDER_CHECK_INTERVAL_SECONDS` (default `30`) for reminder delivery frequency.
+  - Reminders are delivered by a background loop even when no new chat message arrives.
 - Access control:
   - `ALLOWED_TELEGRAM_USER_IDS=12345,67890` restricts usage to listed Telegram `user_id` values.
   - `BOT_PASSWORD=...` enables password login via `/login <password>`.

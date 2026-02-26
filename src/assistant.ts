@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import type { AppConfig } from "./config";
-import type { BotStore, TaskItem } from "./db";
+import type { AlertItem, BotStore, NoteItem, ReminderItem, TaskItem } from "./db";
 
 type EngineDeps = {
   config: AppConfig;
@@ -13,6 +13,34 @@ function summarizeTasks(tasks: TaskItem[]): string {
   }
 
   return tasks.map((task) => `#${task.id} ${task.text}`).join("\n");
+}
+
+function summarizeReminders(reminders: ReminderItem[]): string {
+  if (reminders.length === 0) {
+    return "No pending reminders.";
+  }
+
+  return reminders
+    .map((reminder) => `#${reminder.id} [${reminder.remind_at}] ${reminder.text}`)
+    .join("\n");
+}
+
+function summarizeNotes(notes: NoteItem[]): string {
+  if (notes.length === 0) {
+    return "No notes.";
+  }
+
+  return notes.map((note) => `#${note.id} ${note.text}`).join("\n");
+}
+
+function summarizeOpenAlerts(alerts: AlertItem[]): string {
+  if (alerts.length === 0) {
+    return "No open alerts.";
+  }
+
+  return alerts
+    .map((alert) => `#${alert.id} ${alert.alertname} (${alert.severity}) on ${alert.instance}`)
+    .join("\n");
 }
 
 export class AssistantEngine {
@@ -30,6 +58,9 @@ export class AssistantEngine {
 
   async answer(chatId: string, userText: string): Promise<string> {
     const tasks = this.store.listTasks(chatId, false, 10);
+    const reminders = this.store.listUpcomingReminders(chatId, 10);
+    const notes = this.store.listNotes(chatId, 10);
+    const openAlerts = this.store.listOpenAlerts(chatId, 10);
     const messages = this.store.getRecentMessages(chatId, this.config.maxContextMessages);
     const systemPrompt =
       "You are a concise Telegram task assistant. Use provided task/context memory. If unsure, say what is unknown.";
@@ -37,18 +68,27 @@ export class AssistantEngine {
       "Open tasks:",
       summarizeTasks(tasks),
       "",
+      "Pending reminders:",
+      summarizeReminders(reminders),
+      "",
+      "Recent notes:",
+      summarizeNotes(notes),
+      "",
+      "Open alerts:",
+      summarizeOpenAlerts(openAlerts),
+      "",
       "Conversation memory:",
       messages.map((m) => `[${m.role}] ${m.content}`).join("\n") || "(none)"
     ].join("\n");
 
     if (this.config.aiProvider === "none") {
-      return this.fallbackAnswer(userText, tasks);
+      return this.fallbackAnswer(userText, tasks, reminders, notes, openAlerts);
     }
 
     try {
       if (this.config.aiProvider === "openai") {
         if (!this.client) {
-          return this.fallbackAnswer(userText, tasks);
+          return this.fallbackAnswer(userText, tasks, reminders, notes, openAlerts);
         }
         const completion = await this.client.chat.completions.create({
           model: this.config.openAiModel,
@@ -76,7 +116,7 @@ export class AssistantEngine {
       console.error("AI request failed:", error);
     }
 
-    return this.fallbackAnswer(userText, tasks);
+    return this.fallbackAnswer(userText, tasks, reminders, notes, openAlerts);
   }
 
   private async answerWithGemini(
@@ -139,24 +179,53 @@ export class AssistantEngine {
     return text || null;
   }
 
-  private fallbackAnswer(userText: string, tasks: TaskItem[]): string {
+  private fallbackAnswer(
+    userText: string,
+    tasks: TaskItem[],
+    reminders: ReminderItem[],
+    notes: NoteItem[],
+    openAlerts: AlertItem[]
+  ): string {
     const normalized = userText.toLowerCase();
 
     if (normalized.includes("task") || normalized.includes("todo")) {
       return `Open tasks:\n${summarizeTasks(tasks)}`;
     }
 
+    if (normalized.includes("reminder") || normalized.includes("remind")) {
+      return `Pending reminders:\n${summarizeReminders(reminders)}`;
+    }
+
+    if (normalized.includes("note")) {
+      return `Recent notes:\n${summarizeNotes(notes)}`;
+    }
+
+    if (normalized.includes("alert")) {
+      return `Open alerts:\n${summarizeOpenAlerts(openAlerts)}`;
+    }
+
     if (normalized.includes("remember") || normalized.includes("context")) {
       return [
         "I keep memory for this chat in SQLite.",
-        `Current open tasks:\n${summarizeTasks(tasks)}`
+        `Current open tasks:\n${summarizeTasks(tasks)}`,
+        `Pending reminders:\n${summarizeReminders(reminders)}`,
+        `Open alerts:\n${summarizeOpenAlerts(openAlerts)}`
       ].join("\n");
     }
 
-    if (tasks.length > 0) {
-      return `I saved your message. Current open tasks:\n${summarizeTasks(tasks)}`;
+    if (tasks.length > 0 || reminders.length > 0 || openAlerts.length > 0) {
+      return [
+        "I saved your message.",
+        `Current open tasks:\n${summarizeTasks(tasks)}`,
+        `Pending reminders:\n${summarizeReminders(reminders)}`,
+        `Open alerts:\n${summarizeOpenAlerts(openAlerts)}`
+      ].join("\n");
     }
 
-    return "I saved your message. Send `task: <something>` to create your first task.";
+    return [
+      "I saved your message.",
+      "Use `task: <something>` to create a task.",
+      "Use `/remind ...` or say `remind me to ... in 20 minutes` for reminders."
+    ].join("\n");
   }
 }

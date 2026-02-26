@@ -1,7 +1,11 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
 import { AssistantEngine } from "./assistant";
-import { formatAlertMessage, alertmanagerPayloadSchema } from "./alertmanager";
+import {
+  alertmanagerPayloadSchema,
+  formatAlertMessage,
+  normalizeAlertEvents
+} from "./alertmanager";
 import { createBot } from "./bot";
 import { loadConfig } from "./config";
 import { BotStore } from "./db";
@@ -112,7 +116,7 @@ async function main(): Promise<void> {
       return;
     }
 
-    const text = formatAlertMessage(parsed.data);
+    const events = normalizeAlertEvents(parsed.data);
     logDebug(config.debugMode, "Alertmanager payload accepted", {
       alerts: parsed.data.alerts.length,
       status: parsed.data.status
@@ -120,7 +124,41 @@ async function main(): Promise<void> {
 
     const results = await Promise.allSettled(
       config.alertChatIds.map(async (chatId) => {
-        await bot.telegram.sendMessage(chatId, text);
+        if (events.length === 0) {
+          await bot.telegram.sendMessage(chatId, formatAlertMessage(parsed.data));
+          return chatId;
+        }
+
+        const lines: string[] = [];
+        lines.push(`Alertmanager update: ${parsed.data.status ?? "unknown"}`);
+
+        for (const event of events) {
+          const saved = store.upsertAlert({
+            chatId,
+            fingerprint: event.fingerprint,
+            alertname: event.alertname,
+            instance: event.instance,
+            severity: event.severity,
+            summary: event.summary,
+            status: event.status,
+            source: event.source,
+            startsAt: event.startsAt,
+            endsAt: event.endsAt
+          });
+          const statusLabel = event.status === "resolved" ? "RESOLVED" : "FIRING";
+          lines.push(
+            `- #${saved.id} [${statusLabel}] ${event.alertname} (${event.severity}) on ${event.instance}`
+          );
+          lines.push(`  ${event.summary}`);
+        }
+
+        lines.push("");
+        lines.push("Commands: /alerts  /alertresolve <id>");
+        const rendered = lines.join("\n");
+        await bot.telegram.sendMessage(
+          chatId,
+          rendered.length > 3900 ? `${rendered.slice(0, 3900)}\n...truncated` : rendered
+        );
         return chatId;
       })
     );
@@ -138,7 +176,8 @@ async function main(): Promise<void> {
     res.json({
       ok: failed.length === 0,
       sent_count: sent.length,
-      failed_count: failed.length
+      failed_count: failed.length,
+      tracked_alerts: events.length
     });
   });
 
@@ -168,6 +207,37 @@ async function main(): Promise<void> {
     res.status(500).json(makeErrorResponse("Internal server error"));
   });
 
+  let reminderTickInProgress = false;
+  const runReminderTick = async (): Promise<void> => {
+    if (reminderTickInProgress) {
+      return;
+    }
+    reminderTickInProgress = true;
+    try {
+      const due = store.listDueReminders(new Date().toISOString(), 50);
+      if (due.length > 0) {
+        logDebug(config.debugMode, "Processing due reminders", { count: due.length });
+      }
+      for (const reminder of due) {
+        try {
+          await bot.telegram.sendMessage(
+            reminder.chat_id,
+            `Reminder (#${reminder.id}): ${reminder.text}`
+          );
+          store.markReminderSent(reminder.id);
+        } catch (error) {
+          console.error(`Failed to send reminder #${reminder.id}:`, error);
+        }
+      }
+    } finally {
+      reminderTickInProgress = false;
+    }
+  };
+
+  const reminderTimer = setInterval(() => {
+    void runReminderTick();
+  }, config.reminderCheckIntervalSeconds * 1000);
+
   const server = app.listen(config.port, async () => {
     const webhookUrl = `${config.publicBaseUrl}${webhookPath}`;
     try {
@@ -180,6 +250,15 @@ async function main(): Promise<void> {
         { command: "logout", description: "Clear saved login" },
         { command: "tasks", description: "List open tasks" },
         { command: "done", description: "Mark a task done (/done <id>)" },
+        { command: "alerts", description: "List recent alerts" },
+        { command: "alertresolve", description: "Resolve alert by id" },
+        { command: "remind", description: "Create reminder" },
+        { command: "reminders", description: "List reminders" },
+        { command: "cancelreminder", description: "Cancel reminder by id" },
+        { command: "note", description: "Save quick note" },
+        { command: "notes", description: "List notes" },
+        { command: "delnote", description: "Delete note by id" },
+        { command: "agenda", description: "Daily snapshot" },
         { command: "help", description: "Show help" }
       ]);
       console.log(`Server listening on :${config.port}`);
@@ -195,6 +274,7 @@ async function main(): Promise<void> {
           ip_address: webhookInfo.ip_address
         });
       }
+      await runReminderTick();
     } catch (error) {
       console.error("Webhook setup failed:", error);
     }
@@ -202,6 +282,7 @@ async function main(): Promise<void> {
 
   const shutdown = () => {
     console.log("Shutting down...");
+    clearInterval(reminderTimer);
     server.close(() => {
       store.close();
       process.exit(0);

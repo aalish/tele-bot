@@ -16,6 +16,7 @@ const envSchema = z.object({
   ALLOWED_TELEGRAM_USER_IDS: z.string().default(""),
   BOT_PASSWORD: z.string().optional(),
   DEBUG_MODE: z.string().optional(),
+  REMINDER_CHECK_INTERVAL_SECONDS: z.coerce.number().int().positive().max(3600).default(30),
   AI_PROVIDER: z.enum(["auto", "openai", "gemini", "none"]).default("auto"),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default("gpt-4o-mini"),
@@ -37,6 +38,7 @@ export type AppConfig = {
   allowedTelegramUserIds: ReadonlySet<string>;
   botPassword?: string;
   debugMode: boolean;
+  reminderCheckIntervalSeconds: number;
   aiProvider: AiProvider;
   openAiApiKey?: string;
   openAiModel: string;
@@ -132,6 +134,7 @@ export function loadConfig(): AppConfig {
     allowedTelegramUserIds: parseIdSet(env.ALLOWED_TELEGRAM_USER_IDS),
     botPassword: env.BOT_PASSWORD,
     debugMode: parseBoolean(env.DEBUG_MODE),
+    reminderCheckIntervalSeconds: env.REMINDER_CHECK_INTERVAL_SECONDS,
     aiProvider: resolveAiProvider(env.AI_PROVIDER, env.OPENAI_API_KEY, env.GEMINI_API_KEY),
     openAiApiKey: env.OPENAI_API_KEY,
     openAiModel: env.OPENAI_MODEL,
