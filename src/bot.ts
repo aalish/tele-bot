@@ -54,9 +54,16 @@ function resolveUserId(ctx: { from?: { id: number | string } }): string | null {
   return String(id);
 }
 
-function resolveIncomingText(ctx: { message?: { text?: string } }): string | null {
-  const text = ctx.message?.text;
-  return typeof text === "string" ? text : null;
+function resolveIncomingText(ctx: unknown): string | null {
+  if (!ctx || typeof ctx !== "object") {
+    return null;
+  }
+  const maybeMessage = (ctx as { message?: unknown }).message;
+  if (!maybeMessage || typeof maybeMessage !== "object") {
+    return null;
+  }
+  const maybeText = (maybeMessage as { text?: unknown }).text;
+  return typeof maybeText === "string" ? maybeText : null;
 }
 
 function startsWithCommand(text: string, command: string): boolean {
